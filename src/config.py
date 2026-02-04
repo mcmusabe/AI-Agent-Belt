@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # Vapi.ai Voice
     vapi_private_key: str = Field(..., description="Vapi private API key")
     vapi_public_key: str = Field("", description="Vapi public API key")
+    vapi_assistant_id: str = Field("", description="Vapi assistant ID")
+    vapi_phone_number_id: str = Field("", description="Vapi phone number ID for outbound calls")
+    vapi_phone_number: str = Field("", description="Vapi phone number")
     
     # Telegram Bot
     telegram_bot_token: str = Field("", description="Telegram Bot API token")

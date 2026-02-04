@@ -29,7 +29,7 @@ class VoiceAgent:
         phone_number: str,
         first_message: str,
         system_prompt: str,
-        voice_id: str = "dutch",  # Nederlands
+        voice_id: str = "21m00Tcm4TlvDq8ikWAM",  # ElevenLabs voice
         max_duration_seconds: int = 300,
         phone_number_id: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -47,35 +47,60 @@ class VoiceAgent:
         Returns:
             dict met call details
         """
-        payload = {
-            "assistant": {
-                "firstMessage": first_message,
-                "model": {
-                    "provider": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": system_prompt
-                        }
-                    ]
-                },
-                "voice": {
-                    "provider": "11labs",
-                    "voiceId": voice_id
-                },
-                "maxDurationSeconds": max_duration_seconds,
-                "endCallMessage": "Bedankt voor uw tijd. Tot ziens!",
-                "silenceTimeoutSeconds": 30,
-            },
-            "customer": {
-                "number": phone_number
-            }
-        }
+        # Gebruik geconfigureerde phone number ID als niet meegegeven
+        if not phone_number_id:
+            phone_number_id = self.settings.vapi_phone_number_id
         
-        # Als we een Vapi telefoonnummer hebben
-        if phone_number_id:
-            payload["phoneNumberId"] = phone_number_id
+        # Gebruik de geconfigureerde assistant of maak inline
+        if self.settings.vapi_assistant_id:
+            payload = {
+                "assistantId": self.settings.vapi_assistant_id,
+                "assistantOverrides": {
+                    "firstMessage": first_message,
+                    "model": {
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": system_prompt
+                            }
+                        ]
+                    }
+                },
+                "customer": {
+                    "number": phone_number
+                },
+                "phoneNumberId": phone_number_id
+            }
+        else:
+            payload = {
+                "assistant": {
+                    "firstMessage": first_message,
+                    "model": {
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-20250514",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": system_prompt
+                            }
+                        ]
+                    },
+                    "voice": {
+                        "provider": "11labs",
+                        "voiceId": voice_id
+                    },
+                    "maxDurationSeconds": max_duration_seconds,
+                    "endCallMessage": "Bedankt voor uw tijd. Tot ziens!",
+                    "silenceTimeoutSeconds": 30,
+                },
+                "customer": {
+                    "number": phone_number
+                }
+            }
+            
+            # Als we een Vapi telefoonnummer hebben
+            if phone_number_id:
+                payload["phoneNumberId"] = phone_number_id
         
         async with httpx.AsyncClient() as client:
             response = await client.post(
