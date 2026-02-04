@@ -58,6 +58,8 @@ class VoiceAgent:
                 "assistantOverrides": {
                     "firstMessage": first_message,
                     "model": {
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-20250514",
                         "messages": [
                             {
                                 "role": "system",
