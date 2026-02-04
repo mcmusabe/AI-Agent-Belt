@@ -1,0 +1,391 @@
+"""
+LangGraph Orchestrator - Coördineert alle agents.
+
+Dit is het "brein" van het systeem dat bepaalt welke agent 
+wanneer wordt ingezet en hoe de flow verloopt.
+"""
+from typing import TypedDict, Annotated, Literal, Optional, List, Dict, Any
+from langgraph.graph import StateGraph, END
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+import operator
+import asyncio
+
+from ..config import get_settings
+from ..agents.browser import BrowserAgent
+from ..agents.voice import VoiceAgent
+from ..agents.planner import PlannerAgent
+from ..memory.supabase import get_memory_system
+
+
+class AgentState(TypedDict):
+    """State die door de graph wordt doorgegeven"""
+    # Berichten geschiedenis
+    messages: Annotated[List[BaseMessage], operator.add]
+    
+    # Huidige taak
+    current_task: str
+    
+    # Plan voor uitvoering
+    plan: Optional[Dict[str, Any]]
+    
+    # Resultaten van agents
+    browser_result: Optional[Dict[str, Any]]
+    voice_result: Optional[Dict[str, Any]]
+    
+    # Metadata
+    user_id: str
+    needs_confirmation: bool
+    final_response: Optional[str]
+    
+    # Volgende stap
+    next_step: Optional[str]
+    
+    # User context uit geheugen
+    user_context: Optional[Dict[str, Any]]
+
+
+def create_agent_graph():
+    """
+    Maak de LangGraph workflow voor agent orchestratie.
+    
+    Returns:
+        Gecompileerde StateGraph
+    """
+    settings = get_settings()
+    
+    # Initialiseer LLM voor routing beslissingen
+    llm = ChatAnthropic(
+        model="claude-sonnet-4-20250514",
+        api_key=settings.anthropic_api_key,
+        max_tokens=1024,
+    )
+    
+    # Initialiseer agents
+    planner = PlannerAgent()
+    browser_agent = BrowserAgent()
+    voice_agent = VoiceAgent()
+    
+    # === NODE FUNCTIES ===
+    
+    async def analyze_request(state: AgentState) -> AgentState:
+        """Analyseer het verzoek en maak een plan"""
+        task = state["current_task"]
+        
+        # Analyseer intent
+        intent = await planner.analyze_intent(task)
+        
+        # Maak uitvoeringsplan
+        plan = await planner.create_plan(task)
+        
+        # Bepaal of bevestiging nodig is
+        needs_confirmation = plan.requires_user_confirmation
+        
+        return {
+            **state,
+            "plan": {
+                "goal": plan.goal,
+                "steps": [s.model_dump() for s in plan.steps],
+                "intent": intent
+            },
+            "needs_confirmation": needs_confirmation,
+            "messages": [AIMessage(content=f"Plan gemaakt: {plan.goal}")]
+        }
+    
+    async def execute_browser_task(state: AgentState) -> AgentState:
+        """Voer browser taak uit of gebruik AI voor informatie"""
+        plan = state.get("plan", {})
+        task = state["current_task"]
+        intent = plan.get("intent", {})
+        user_context = state.get("user_context")
+        
+        # Bouw context prompt als we user info hebben
+        context_prompt = ""
+        if user_context:
+            user_name = user_context.get("user", {}).get("name", "")
+            preferences = user_context.get("preferences", {})
+            memories = user_context.get("memories", [])
+            recent = user_context.get("recent_messages", [])
+            
+            if user_name:
+                context_prompt += f"\nDe gebruiker heet {user_name}."
+            if preferences:
+                context_prompt += f"\nHun voorkeuren: {preferences}"
+            if memories:
+                memory_text = "; ".join([f"{m['type']}: {m['content']}" for m in memories[:5]])
+                context_prompt += f"\nBelangrijke info over deze gebruiker: {memory_text}"
+            if recent:
+                recent_text = "\n".join([f"- {m['role']}: {m['content'][:100]}..." for m in recent[-3:]])
+                context_prompt += f"\nRecente berichten:\n{recent_text}"
+        
+        # Voor informatieve vragen, gebruik direct Claude
+        if intent.get("intent") in ["informatie", "vraag"]:
+            # Beantwoord direct met Claude
+            response = await llm.ainvoke([
+                HumanMessage(content=f"""Je bent een behulpzame Nederlandse AI assistent genaamd AI Agent Belt.
+{context_prompt}
+
+Beantwoord de volgende vraag zo goed mogelijk:
+
+{task}
+
+Geef een nuttig en informatief antwoord in het Nederlands. Wees vriendelijk en persoonlijk.""")
+            ])
+            
+            return {
+                **state,
+                "browser_result": {"success": True, "result": response.content},
+                "messages": [AIMessage(content=response.content)]
+            }
+        
+        # Voor andere taken, probeer browser (als geconfigureerd)
+        browser_steps = [s for s in plan.get("steps", []) if s.get("agent_type") == "browser"]
+        
+        if browser_steps:
+            step_description = browser_steps[0]["description"]
+        else:
+            step_description = task
+        
+        try:
+            result = await browser_agent.execute_task(step_description)
+            
+            return {
+                **state,
+                "browser_result": result,
+                "messages": [AIMessage(content=f"Browser taak voltooid: {result.get('result', 'Geen resultaat')}")]
+            }
+        except Exception as e:
+            # Fallback: beantwoord met Claude als browser niet werkt
+            error_msg = str(e)
+            
+            # Als het een configuratie fout is, gebruik Claude
+            if "BROWSER_USE_API_KEY" in error_msg or "API_KEY" in error_msg:
+                response = await llm.ainvoke([
+                    HumanMessage(content=f"""Je bent een behulpzame Nederlandse AI assistent genaamd AI Agent Belt.
+{context_prompt}
+
+De gebruiker vroeg: {task}
+
+Browser automatisering is niet beschikbaar. Beantwoord de vraag zo goed mogelijk met je eigen kennis.
+Als het gaat om een reservering of actie die je niet kunt uitvoeren, leg dan uit wat de gebruiker zelf kan doen.
+Wees vriendelijk en persoonlijk.""")
+                ])
+                
+                return {
+                    **state,
+                    "browser_result": {"success": True, "result": response.content},
+                    "messages": [AIMessage(content=response.content)]
+                }
+            
+            return {
+                **state,
+                "browser_result": {"success": False, "error": error_msg},
+                "messages": [AIMessage(content=f"Browser taak mislukt: {error_msg}")]
+            }
+        finally:
+            try:
+                await browser_agent.close()
+            except:
+                pass
+    
+    async def execute_voice_task(state: AgentState) -> AgentState:
+        """Voer voice/telefoon taak uit"""
+        plan = state.get("plan", {})
+        intent = plan.get("intent", {})
+        entities = intent.get("entities", {})
+        
+        # Extract reserveringsdetails
+        venue = entities.get("venue", "het restaurant")
+        date = entities.get("date", "vandaag")
+        time = entities.get("time", "19:00")
+        party_size = entities.get("party_size", 2)
+        
+        # TODO: In productie zou je hier het telefoonnummer moeten opzoeken
+        # Voor nu simuleren we het resultaat
+        result = {
+            "success": True,
+            "message": f"Telefoongesprek zou worden gestart naar {venue} voor {party_size} personen op {date} om {time}",
+            "note": "Vapi telefoon nummer vereist voor daadwerkelijk bellen"
+        }
+        
+        return {
+            **state,
+            "voice_result": result,
+            "messages": [AIMessage(content=f"Voice taak: {result.get('message')}")]
+        }
+    
+    async def generate_response(state: AgentState) -> AgentState:
+        """Genereer de finale response voor de gebruiker"""
+        browser_result = state.get("browser_result")
+        voice_result = state.get("voice_result")
+        plan = state.get("plan", {})
+        
+        # Als browser_result een AI response bevat, gebruik die direct
+        if browser_result and browser_result.get("success"):
+            result_text = browser_result.get("result", "")
+            if result_text and len(result_text) > 50:  # Waarschijnlijk een AI response
+                return {
+                    **state,
+                    "final_response": result_text,
+                    "messages": [AIMessage(content=result_text)]
+                }
+        
+        # Combineer resultaten
+        results_summary = []
+        
+        if browser_result:
+            if browser_result.get("success"):
+                results_summary.append(f"✅ {browser_result.get('result', 'Taak uitgevoerd')}")
+            else:
+                results_summary.append(f"❌ Online taak mislukt: {browser_result.get('error', 'Onbekende fout')}")
+        
+        if voice_result:
+            if voice_result.get("success"):
+                results_summary.append(f"📞 {voice_result.get('message', 'Gesprek voltooid')}")
+            else:
+                results_summary.append(f"❌ Telefoongesprek mislukt: {voice_result.get('error', 'Onbekende fout')}")
+        
+        final_response = "\n".join(results_summary) if results_summary else "Taak verwerkt."
+        
+        return {
+            **state,
+            "final_response": final_response,
+            "messages": [AIMessage(content=final_response)]
+        }
+    
+    def route_after_analysis(state: AgentState) -> str:
+        """Bepaal de volgende stap na analyse"""
+        plan = state.get("plan", {})
+        intent = plan.get("intent", {})
+        steps = plan.get("steps", [])
+        
+        if not steps:
+            return "generate_response"
+        
+        # Bepaal welke agent eerst moet
+        first_step = steps[0]
+        agent_type = first_step.get("agent_type", "browser")
+        
+        if agent_type == "voice":
+            return "execute_voice"
+        elif agent_type == "browser":
+            return "execute_browser"
+        else:
+            return "execute_browser"  # Default naar browser
+    
+    def route_after_browser(state: AgentState) -> str:
+        """Bepaal volgende stap na browser taak"""
+        plan = state.get("plan", {})
+        steps = plan.get("steps", [])
+        browser_result = state.get("browser_result", {})
+        
+        # Check of we voice moeten doen (bijv. als online niet lukte)
+        if not browser_result.get("success"):
+            # Zoek fallback
+            voice_steps = [s for s in steps if s.get("agent_type") == "voice"]
+            if voice_steps:
+                return "execute_voice"
+        
+        return "generate_response"
+    
+    def route_after_voice(state: AgentState) -> str:
+        """Bepaal volgende stap na voice taak"""
+        return "generate_response"
+    
+    # === BOUW DE GRAPH ===
+    
+    workflow = StateGraph(AgentState)
+    
+    # Voeg nodes toe
+    workflow.add_node("analyze", analyze_request)
+    workflow.add_node("execute_browser", execute_browser_task)
+    workflow.add_node("execute_voice", execute_voice_task)
+    workflow.add_node("generate_response", generate_response)
+    
+    # Voeg edges toe
+    workflow.set_entry_point("analyze")
+    
+    workflow.add_conditional_edges(
+        "analyze",
+        route_after_analysis,
+        {
+            "execute_browser": "execute_browser",
+            "execute_voice": "execute_voice",
+            "generate_response": "generate_response"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "execute_browser",
+        route_after_browser,
+        {
+            "execute_voice": "execute_voice",
+            "generate_response": "generate_response"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "execute_voice",
+        route_after_voice,
+        {
+            "generate_response": "generate_response"
+        }
+    )
+    
+    workflow.add_edge("generate_response", END)
+    
+    # Compileer de graph
+    return workflow.compile()
+
+
+# Singleton instance
+_graph = None
+
+def get_agent_graph():
+    """Get or create the agent graph"""
+    global _graph
+    if _graph is None:
+        _graph = create_agent_graph()
+    return _graph
+
+
+async def process_request(user_message: str, user_id: str = "default") -> str:
+    """
+    Verwerk een gebruikersverzoek door de volledige agent pipeline.
+    
+    Args:
+        user_message: Het verzoek van de gebruiker
+        user_id: ID van de gebruiker
+        
+    Returns:
+        Response string
+    """
+    graph = get_agent_graph()
+    settings = get_settings()
+    
+    # Haal user context uit memory als beschikbaar
+    user_context = None
+    if settings.supabase_url and settings.supabase_anon_key:
+        try:
+            memory = get_memory_system()
+            user_context = await memory.get_user_context(user_id)
+        except Exception as e:
+            pass  # Memory niet beschikbaar, ga door zonder context
+    
+    initial_state: AgentState = {
+        "messages": [HumanMessage(content=user_message)],
+        "current_task": user_message,
+        "plan": None,
+        "browser_result": None,
+        "voice_result": None,
+        "user_id": user_id,
+        "needs_confirmation": False,
+        "final_response": None,
+        "next_step": None,
+        "user_context": user_context
+    }
+    
+    # Run de graph
+    result = await graph.ainvoke(initial_state)
+    
+    return result.get("final_response", "Er is iets misgegaan bij het verwerken van je verzoek.")
