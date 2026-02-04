@@ -189,30 +189,88 @@ Wees vriendelijk en persoonlijk.""")
                 pass
     
     async def execute_voice_task(state: AgentState) -> AgentState:
-        """Voer voice/telefoon taak uit"""
+        """Voer voice/telefoon taak uit - BEL ECHT via Vapi"""
+        import re
+        
+        task = state["current_task"]
         plan = state.get("plan", {})
         intent = plan.get("intent", {})
         entities = intent.get("entities", {})
         
-        # Extract reserveringsdetails
-        venue = entities.get("venue", "het restaurant")
-        date = entities.get("date", "vandaag")
-        time = entities.get("time", "19:00")
-        party_size = entities.get("party_size", 2)
+        # Extract telefoonnummer uit de taak
+        phone_match = re.search(r'\+?\d[\d\s\-]{8,}', task)
+        phone_number = phone_match.group().replace(" ", "").replace("-", "") if phone_match else None
         
-        # TODO: In productie zou je hier het telefoonnummer moeten opzoeken
-        # Voor nu simuleren we het resultaat
-        result = {
-            "success": True,
-            "message": f"Telefoongesprek zou worden gestart naar {venue} voor {party_size} personen op {date} om {time}",
-            "note": "Vapi telefoon nummer vereist voor daadwerkelijk bellen"
-        }
+        if not phone_number:
+            return {
+                **state,
+                "voice_result": {"success": False, "error": "Geen telefoonnummer gevonden in je verzoek"},
+                "messages": [AIMessage(content="❌ Ik kon geen telefoonnummer vinden. Geef een nummer op zoals: +31612345678")]
+            }
         
-        return {
-            **state,
-            "voice_result": result,
-            "messages": [AIMessage(content=f"Voice taak: {result.get('message')}")]
-        }
+        # Zorg dat nummer internationaal formaat heeft
+        if not phone_number.startswith("+"):
+            if phone_number.startswith("0"):
+                phone_number = "+31" + phone_number[1:]
+            else:
+                phone_number = "+" + phone_number
+        
+        # Bepaal het doel van het gesprek uit de taak
+        system_prompt = f"""Je bent een Nederlandse AI assistent die belt namens de gebruiker.
+        
+De gebruiker vroeg: {task}
+
+Voer dit gesprek vriendelijk en professioneel. Spreek Nederlands.
+Als je informatie moet vragen, doe dat beleefd.
+Bevestig aan het einde wat je hebt gehoord/afgesproken."""
+
+        first_message = "Goedendag, ik bel namens een klant. "
+        
+        # Pas first_message aan op basis van de taak
+        if "open" in task.lower():
+            first_message += "Ik wilde even vragen wat uw openingstijden zijn?"
+        elif "reserv" in task.lower():
+            first_message += "Ik zou graag een reservering willen maken."
+        else:
+            first_message += "Ik heb een vraag voor u."
+        
+        try:
+            # ECHTE CALL via Vapi
+            call_result = await voice_agent.create_call(
+                phone_number=phone_number,
+                first_message=first_message,
+                system_prompt=system_prompt
+            )
+            
+            if call_result.get("success"):
+                call_data = call_result.get("call", {})
+                call_id = call_data.get("id", "onbekend")
+                
+                result = {
+                    "success": True,
+                    "message": f"📞 Gesprek gestart naar {phone_number}",
+                    "call_id": call_id,
+                    "status": "calling"
+                }
+                return {
+                    **state,
+                    "voice_result": result,
+                    "messages": [AIMessage(content=f"📞 Ik bel nu {phone_number}... Het gesprek is gestart! (Call ID: {call_id})")]
+                }
+            else:
+                error = call_result.get("error", "Onbekende fout")
+                return {
+                    **state,
+                    "voice_result": {"success": False, "error": error},
+                    "messages": [AIMessage(content=f"❌ Kon niet bellen: {error}")]
+                }
+                
+        except Exception as e:
+            return {
+                **state,
+                "voice_result": {"success": False, "error": str(e)},
+                "messages": [AIMessage(content=f"❌ Fout bij bellen: {str(e)}")]
+            }
     
     async def generate_response(state: AgentState) -> AgentState:
         """Genereer de finale response voor de gebruiker"""
@@ -258,6 +316,16 @@ Wees vriendelijk en persoonlijk.""")
         plan = state.get("plan", {})
         intent = plan.get("intent", {})
         steps = plan.get("steps", [])
+        task = state.get("current_task", "").lower()
+        
+        # Check direct op "bel" in de taak - dan ALTIJD voice
+        if any(word in task for word in ["bel ", "bel+", "bellen", "telefoneer", "call "]):
+            return "execute_voice"
+        
+        # Check intent van planner
+        intent_type = intent.get("intent", "")
+        if intent_type == "bellen":
+            return "execute_voice"
         
         if not steps:
             return "generate_response"

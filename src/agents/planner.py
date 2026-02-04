@@ -136,15 +136,19 @@ Geef je antwoord als JSON in dit formaat:
             dict met intent analyse
         """
         system_prompt = """Analyseer het bericht en bepaal:
-1. De primaire intentie (reservering, informatie, aankoop, anders)
-2. Entiteiten (restaurant naam, datum, tijd, aantal personen, etc.)
+1. De primaire intentie
+2. Entiteiten (telefoonnummer, restaurant naam, datum, tijd, aantal personen, etc.)
 3. Urgentie (hoog, normaal, laag)
 4. Of er aanvullende informatie nodig is
 
+BELANGRIJK: Als de gebruiker vraagt om te BELLEN of een telefoongesprek te voeren, is de intent ALTIJD "bellen".
+Kijk naar woorden zoals: bel, bellen, telefoneer, call, telefoon, etc.
+
 Geef je antwoord als JSON:
 {
-    "intent": "reservering|informatie|aankoop|vraag|anders",
+    "intent": "bellen|reservering|informatie|aankoop|vraag|anders",
     "entities": {
+        "phone_number": "telefoonnummer indien genoemd",
         "venue": "naam indien genoemd",
         "date": "datum indien genoemd",
         "time": "tijd indien genoemd",
