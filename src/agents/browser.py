@@ -19,16 +19,25 @@ from ..config import get_settings
 class BrowserAgent:
     """Agent die websites autonoom kan bedienen via Browser-Use"""
     
-    def __init__(self):
+    def __init__(self, headless: bool = True):
+        """
+        Initialize browser agent.
+        
+        Args:
+            headless: Run browser in headless mode (True voor productie)
+        """
         self.settings = get_settings()
         # Set API key in environment for browser-use
         os.environ["ANTHROPIC_API_KEY"] = self.settings.anthropic_api_key
         self.browser: Optional[Browser] = None
+        self.headless = headless
     
     async def initialize(self):
         """Initialiseer de browser"""
         if self.browser is None:
-            self.browser = Browser(headless=False)  # Zet op True voor productie
+            # Productie mode: headless=True
+            # Development mode: headless=False om te zien wat er gebeurt
+            self.browser = Browser(headless=self.headless)
     
     async def execute_task(self, task: str, max_steps: int = 25) -> dict:
         """

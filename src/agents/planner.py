@@ -209,3 +209,63 @@ Geef je antwoord als JSON:
         
         response = await self.llm.ainvoke(messages)
         return response.content
+    
+    async def extract_preferences(
+        self,
+        message: str,
+        current_preferences: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Analyseer een bericht en extract mogelijke voorkeuren.
+        
+        Args:
+            message: Het bericht van de gebruiker
+            current_preferences: Huidige bekende voorkeuren
+            
+        Returns:
+            dict met gedetecteerde voorkeuren (alleen nieuwe/gewijzigde)
+        """
+        system_prompt = """Je analyseert berichten om gebruikersvoorkeuren te leren.
+Zoek naar expliciete en impliciete voorkeuren zoals:
+- Favoriete restaurants/locaties
+- Dieet restricties (vegetarisch, halal, etc.)
+- Tijdvoorkeuren (liever 's avonds, weekenden)
+- Communicatievoorkeuren
+- Naam van de gebruiker
+- Favoriete keukens
+
+HUIDIGE VOORKEUREN (niet opnieuw rapporteren):
+{current}
+
+Geef ALLEEN nieuwe of gewijzigde voorkeuren terug als JSON:
+{{
+    "detected_preferences": {{
+        "preference_key": "waarde"
+    }},
+    "confidence": 0.0-1.0,
+    "reasoning": "korte uitleg waarom deze voorkeur gedetecteerd is"
+}}
+
+Als er GEEN nieuwe voorkeuren zijn, geef een lege dict:
+{{"detected_preferences": {{}}, "confidence": 0, "reasoning": "geen nieuwe voorkeuren"}}"""
+
+        messages = [
+            SystemMessage(content=system_prompt.format(
+                current=json.dumps(current_preferences, ensure_ascii=False)
+            )),
+            HumanMessage(content=message)
+        ]
+        
+        response = await self.llm.ainvoke(messages)
+        
+        try:
+            content = response.content
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+            
+            result = json.loads(content)
+            return result.get("detected_preferences", {})
+        except json.JSONDecodeError:
+            return {}

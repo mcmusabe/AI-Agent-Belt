@@ -71,6 +71,8 @@ def create_agent_graph():
     async def analyze_request(state: AgentState) -> AgentState:
         """Analyseer het verzoek en maak een plan"""
         task = state["current_task"]
+        user_id = state.get("user_id", "default")
+        user_context = state.get("user_context")
         
         # Analyseer intent
         intent = await planner.analyze_intent(task)
@@ -80,6 +82,32 @@ def create_agent_graph():
         
         # Bepaal of bevestiging nodig is
         needs_confirmation = plan.requires_user_confirmation
+        
+        # Probeer voorkeuren te extraheren en op te slaan
+        if settings.supabase_url and settings.supabase_anon_key:
+            try:
+                memory = get_memory_system()
+                current_prefs = {}
+                if user_context:
+                    current_prefs = user_context.get("preferences", {})
+                
+                # Extract nieuwe voorkeuren
+                new_prefs = await planner.extract_preferences(task, current_prefs)
+                
+                # Sla op als er nieuwe voorkeuren zijn
+                if new_prefs:
+                    await memory.update_user_preferences(user_id, new_prefs)
+                    
+                    # Sla ook op als memory voor context
+                    for key, value in new_prefs.items():
+                        await memory.add_memory(
+                            telegram_id=user_id,
+                            memory_type="preference",
+                            content=f"{key}: {value}",
+                            importance=6
+                        )
+            except Exception as e:
+                pass  # Memory niet beschikbaar
         
         return {
             **state,
@@ -198,10 +226,37 @@ Wees vriendelijk en persoonlijk.""")
         plan = state.get("plan", {})
         intent = plan.get("intent", {})
         entities = intent.get("entities", {})
+        user_id = state.get("user_id", "default")
         
         # Extract telefoonnummer uit de taak
         phone_match = re.search(r'\+?\d[\d\s\-]{8,}', task)
         phone_number = phone_match.group().replace(" ", "").replace("-", "") if phone_match else None
+        
+        # Als geen nummer gevonden, probeer contact lookup
+        if not phone_number and settings.supabase_url and settings.supabase_anon_key:
+            try:
+                memory = get_memory_system()
+                # Zoek naar een naam in de taak
+                # Patronen zoals "bel Jan", "bel Restaurant De Kas", "bel mijn moeder"
+                name_patterns = [
+                    r'bel\s+(?:eens\s+)?(?:naar\s+)?(.+?)(?:\s+(?:om|voor|en|dat|of)|$)',
+                    r'call\s+(.+?)(?:\s+(?:to|for|and|that|or)|$)',
+                ]
+                
+                for pattern in name_patterns:
+                    name_match = re.search(pattern, task.lower())
+                    if name_match:
+                        potential_name = name_match.group(1).strip()
+                        # Filter out telefoonnummer-achtige strings
+                        if not re.search(r'\d{5,}', potential_name):
+                            contact = await memory.get_contact_by_name(user_id, potential_name)
+                            if contact and contact.get("phone_number"):
+                                phone_number = contact["phone_number"]
+                                # Voeg contactnaam toe aan task context
+                                task = f"{task} (Contact: {contact['name']})"
+                                break
+            except Exception as e:
+                pass  # Memory niet beschikbaar
         
         if not phone_number:
             return {
@@ -438,7 +493,7 @@ def get_agent_graph():
     return _graph
 
 
-async def process_request(user_message: str, user_id: str = "default") -> str:
+async def process_request(user_message: str, user_id: str = "default") -> Dict[str, Any]:
     """
     Verwerk een gebruikersverzoek door de volledige agent pipeline.
     
@@ -447,7 +502,7 @@ async def process_request(user_message: str, user_id: str = "default") -> str:
         user_id: ID van de gebruiker
         
     Returns:
-        Response string
+        Dict met response, call_id (indien voice call), en andere metadata
     """
     graph = get_agent_graph()
     settings = get_settings()
@@ -477,4 +532,12 @@ async def process_request(user_message: str, user_id: str = "default") -> str:
     # Run de graph
     result = await graph.ainvoke(initial_state)
     
-    return result.get("final_response", "Er is iets misgegaan bij het verwerken van je verzoek.")
+    # Extract call_id als er een voice call was
+    voice_result = result.get("voice_result", {})
+    call_id = voice_result.get("call_id") if voice_result else None
+    
+    return {
+        "response": result.get("final_response", "Er is iets misgegaan bij het verwerken van je verzoek."),
+        "call_id": call_id,
+        "voice_result": voice_result
+    }

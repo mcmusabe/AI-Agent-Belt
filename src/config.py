@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     supabase_anon_key: str = Field("", description="Supabase anon key")
     supabase_service_key: str = Field("", description="Supabase service key")
     
+    # OpenAI (voor Whisper speech-to-text)
+    openai_api_key: str = Field("", description="OpenAI API key voor Whisper")
+    
     # Server
     host: str = Field("0.0.0.0", description="Server host")
     port: int = Field(8000, description="Server port")

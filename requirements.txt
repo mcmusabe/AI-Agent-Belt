@@ -37,3 +37,9 @@ tenacity>=9.0.0
 
 # Timezone
 pytz>=2024.1
+
+# Speech-to-Text
+openai>=1.0.0
+
+# Scheduler voor herinneringen
+apscheduler>=3.10.0

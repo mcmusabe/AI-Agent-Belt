@@ -290,6 +290,221 @@ class MemorySystem:
         
         return result.data
     
+    # === CONTACT MANAGEMENT ===
+    
+    async def add_contact(
+        self,
+        telegram_id: str,
+        name: str,
+        phone_number: Optional[str] = None,
+        email: Optional[str] = None,
+        category: str = "overig",
+        notes: Optional[str] = None,
+        metadata: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Voeg een contact toe.
+        
+        Args:
+            telegram_id: Telegram user ID
+            name: Naam van het contact
+            phone_number: Telefoonnummer
+            email: E-mailadres
+            category: Categorie (restaurant, bedrijf, persoonlijk, overig)
+            notes: Notities
+            metadata: Extra metadata
+        """
+        user = await self.get_or_create_user(telegram_id)
+        
+        contact_data = {
+            "user_id": user["id"],
+            "name": name,
+            "phone_number": phone_number,
+            "email": email,
+            "category": category,
+            "notes": notes,
+            "metadata": metadata or {}
+        }
+        
+        result = self.client.table("agent_contacts").insert(contact_data).execute()
+        return result.data[0]
+    
+    async def get_contacts(
+        self,
+        telegram_id: str,
+        category: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Haal contacten op voor een gebruiker"""
+        user = await self.get_or_create_user(telegram_id)
+        
+        query = self.client.table("agent_contacts").select("*").eq(
+            "user_id", user["id"]
+        )
+        
+        if category:
+            query = query.eq("category", category)
+        
+        result = query.order("name").limit(limit).execute()
+        return result.data
+    
+    async def search_contacts(
+        self,
+        telegram_id: str,
+        search_term: str
+    ) -> List[Dict[str, Any]]:
+        """Zoek contacten op naam"""
+        user = await self.get_or_create_user(telegram_id)
+        
+        result = self.client.table("agent_contacts").select("*").eq(
+            "user_id", user["id"]
+        ).ilike("name", f"%{search_term}%").limit(10).execute()
+        
+        return result.data
+    
+    async def get_contact_by_name(
+        self,
+        telegram_id: str,
+        name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Vind een contact op exacte of gedeeltelijke naam"""
+        user = await self.get_or_create_user(telegram_id)
+        
+        # Probeer eerst exact
+        result = self.client.table("agent_contacts").select("*").eq(
+            "user_id", user["id"]
+        ).ilike("name", name).limit(1).execute()
+        
+        if result.data:
+            return result.data[0]
+        
+        # Probeer gedeeltelijke match
+        result = self.client.table("agent_contacts").select("*").eq(
+            "user_id", user["id"]
+        ).ilike("name", f"%{name}%").limit(1).execute()
+        
+        return result.data[0] if result.data else None
+    
+    async def update_contact(
+        self,
+        telegram_id: str,
+        contact_id: str,
+        updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Update een contact"""
+        user = await self.get_or_create_user(telegram_id)
+        
+        # Zorg dat alleen eigen contacten worden bijgewerkt
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        
+        self.client.table("agent_contacts").update(updates).eq(
+            "id", contact_id
+        ).eq("user_id", user["id"]).execute()
+        
+        result = self.client.table("agent_contacts").select("*").eq(
+            "id", contact_id
+        ).execute()
+        
+        return result.data[0] if result.data else {}
+    
+    async def delete_contact(
+        self,
+        telegram_id: str,
+        contact_id: str
+    ) -> bool:
+        """Verwijder een contact"""
+        user = await self.get_or_create_user(telegram_id)
+        
+        self.client.table("agent_contacts").delete().eq(
+            "id", contact_id
+        ).eq("user_id", user["id"]).execute()
+        
+        return True
+    
+    # === REMINDER MANAGEMENT ===
+    
+    async def add_reminder(
+        self,
+        telegram_id: str,
+        message: str,
+        remind_at: datetime,
+        telegram_chat_id: str,
+        repeat_interval: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Voeg een herinnering toe.
+        
+        Args:
+            telegram_id: Telegram user ID
+            message: De herinnering tekst
+            remind_at: Wanneer de herinnering moet afgaan
+            telegram_chat_id: Chat ID voor het sturen van de herinnering
+            repeat_interval: Herhaling (daily, weekly, monthly, of None)
+        """
+        user = await self.get_or_create_user(telegram_id)
+        
+        reminder_data = {
+            "user_id": user["id"],
+            "message": message,
+            "remind_at": remind_at.isoformat(),
+            "telegram_chat_id": telegram_chat_id,
+            "repeat_interval": repeat_interval,
+            "is_sent": False
+        }
+        
+        result = self.client.table("agent_reminders").insert(reminder_data).execute()
+        return result.data[0]
+    
+    async def get_due_reminders(self) -> List[Dict[str, Any]]:
+        """Haal alle herinneringen op die nu verstuurd moeten worden"""
+        now = datetime.utcnow().isoformat()
+        
+        result = self.client.table("agent_reminders").select(
+            "*, agent_users!inner(telegram_id, first_name)"
+        ).lte("remind_at", now).eq("is_sent", False).execute()
+        
+        return result.data
+    
+    async def mark_reminder_sent(self, reminder_id: str):
+        """Markeer een herinnering als verstuurd"""
+        self.client.table("agent_reminders").update({
+            "is_sent": True,
+            "sent_at": datetime.utcnow().isoformat()
+        }).eq("id", reminder_id).execute()
+    
+    async def get_user_reminders(
+        self,
+        telegram_id: str,
+        include_sent: bool = False,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Haal herinneringen op voor een gebruiker"""
+        user = await self.get_or_create_user(telegram_id)
+        
+        query = self.client.table("agent_reminders").select("*").eq(
+            "user_id", user["id"]
+        )
+        
+        if not include_sent:
+            query = query.eq("is_sent", False)
+        
+        result = query.order("remind_at").limit(limit).execute()
+        return result.data
+    
+    async def delete_reminder(
+        self,
+        telegram_id: str,
+        reminder_id: str
+    ) -> bool:
+        """Verwijder een herinnering"""
+        user = await self.get_or_create_user(telegram_id)
+        
+        self.client.table("agent_reminders").delete().eq(
+            "id", reminder_id
+        ).eq("user_id", user["id"]).execute()
+        
+        return True
+    
     # === CONTEXT BUILDING ===
     
     async def get_user_context(self, telegram_id: str) -> Dict[str, Any]:
