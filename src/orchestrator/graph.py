@@ -191,6 +191,8 @@ Wees vriendelijk en persoonlijk.""")
     async def execute_voice_task(state: AgentState) -> AgentState:
         """Voer voice/telefoon taak uit - BEL ECHT via Vapi"""
         import re
+        from datetime import datetime
+        import pytz
         
         task = state["current_task"]
         plan = state.get("plan", {})
@@ -215,24 +217,43 @@ Wees vriendelijk en persoonlijk.""")
             else:
                 phone_number = "+" + phone_number
         
-        # Bepaal het doel van het gesprek uit de taak
-        system_prompt = f"""Je bent een Nederlandse AI assistent die belt namens de gebruiker.
+        # Bepaal tijdstip voor begroeting
+        try:
+            nl_tz = pytz.timezone('Europe/Amsterdam')
+            now = datetime.now(nl_tz)
+            hour = now.hour
+        except:
+            hour = 12  # Default middag
         
-De gebruiker vroeg: {task}
-
-Voer dit gesprek vriendelijk en professioneel. Spreek Nederlands.
-Als je informatie moet vragen, doe dat beleefd.
-Bevestig aan het einde wat je hebt gehoord/afgesproken."""
-
-        first_message = "Goedendag, ik bel namens een klant. "
-        
-        # Pas first_message aan op basis van de taak
-        if "open" in task.lower():
-            first_message += "Ik wilde even vragen wat uw openingstijden zijn?"
-        elif "reserv" in task.lower():
-            first_message += "Ik zou graag een reservering willen maken."
+        if 6 <= hour < 12:
+            greeting = "Goedemorgen"
+        elif 12 <= hour < 18:
+            greeting = "Goedemiddag"
         else:
-            first_message += "Ik heb een vraag voor u."
+            greeting = "Goedenavond"
+        
+        # Bepaal het doel van het gesprek uit de taak
+        system_prompt = f"""Je bent Sophie, een vriendelijke Nederlandse assistente. Je belt namens een klant.
+
+HUIDIGE TIJD: Het is nu {hour}:00 uur (gebruik de juiste begroeting: {greeting})
+
+DE OPDRACHT VAN DE KLANT: {task}
+
+BELANGRIJK:
+- Spreek natuurlijk Nederlands, geen robotachtige zinnen
+- Gebruik tussenwerpingen zoals "eh...", "even kijken", "momentje"
+- Luister goed en vraag door als iets onduidelijk is
+- Als het restaurant/bedrijf vol zit, vraag naar alternatieven
+- Vat aan het einde samen wat er is afgesproken
+- Wees beleefd maar niet overdreven formeel"""
+
+        # Pas first_message aan op basis van de taak en tijdstip
+        if "open" in task.lower():
+            first_message = f"{greeting}, u spreekt met Sophie. Ik bel even om te vragen wat uw openingstijden zijn?"
+        elif "reserv" in task.lower():
+            first_message = f"{greeting}, met Sophie. Ik zou graag een reservering willen maken, kan dat?"
+        else:
+            first_message = f"{greeting}, u spreekt met Sophie. Ik bel namens een klant van mij."
         
         try:
             # ECHTE CALL via Vapi

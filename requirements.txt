@@ -34,3 +34,6 @@ pydantic-settings>=2.12.0
 
 # Async support
 tenacity>=9.0.0
+
+# Timezone
+pytz>=2024.1
