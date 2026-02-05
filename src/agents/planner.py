@@ -31,7 +31,7 @@ class ExecutionPlan(BaseModel):
     steps: List[TaskStep]
     estimated_total_duration: str
     requires_user_confirmation: bool = False
-    warnings: List[str] = []
+    warnings: List[str] = Field(default_factory=list)
 
 
 class PlannerAgent:
@@ -61,14 +61,18 @@ class PlannerAgent:
 Je hebt toegang tot de volgende agents:
 1. BROWSER AGENT: Kan websites bezoeken, formulieren invullen, reserveringen maken online
 2. VOICE AGENT: Kan telefonisch bellen naar bedrijven (restaurants, hotels, etc.)
-3. RESEARCH AGENT: Kan informatie opzoeken en samenvatten
+3. SMS AGENT: Kan SMS berichten versturen via Twilio
+4. EMAIL AGENT: Kan e-mails versturen via Gmail
+5. CALENDAR AGENT: Kan agenda-afspraken aanmaken in Google Calendar
+6. REMINDER AGENT: Kan herinneringen instellen
+7. RESEARCH AGENT: Kan informatie opzoeken en samenvatten
 
 Regels:
 - Splits complexe taken op in logische stappen
 - Kies de meest efficiënte aanpak (online > telefoon indien mogelijk)
 - Geef altijd een fallback optie als de primaire aanpak faalt
 - Wees realistisch over tijdsinschattingen
-- Markeer taken die gebruikersbevestiging nodig hebben (bijv. betalingen)
+- Markeer taken die gebruikersbevestiging nodig hebben (bellen, sms, mail, betalingen)
 
 Geef je antwoord als JSON in dit formaat:
 {
@@ -77,7 +81,7 @@ Geef je antwoord als JSON in dit formaat:
         {
             "step_number": 1,
             "description": "Wat er moet gebeuren",
-            "agent_type": "browser|voice|research",
+            "agent_type": "browser|voice|sms|email|calendar|reminder|research",
             "estimated_duration": "X minuten",
             "fallback": "Alternatief als dit faalt"
         }
@@ -137,22 +141,37 @@ Geef je antwoord als JSON in dit formaat:
         """
         system_prompt = """Analyseer het bericht en bepaal:
 1. De primaire intentie
-2. Entiteiten (telefoonnummer, restaurant naam, datum, tijd, aantal personen, etc.)
+2. Entiteiten (telefoonnummer, naam, datum, tijd, bericht, etc.)
 3. Urgentie (hoog, normaal, laag)
 4. Of er aanvullende informatie nodig is
 
-BELANGRIJK: Als de gebruiker vraagt om te BELLEN of een telefoongesprek te voeren, is de intent ALTIJD "bellen".
-Kijk naar woorden zoals: bel, bellen, telefoneer, call, telefoon, etc.
+INTENT HERKENNING:
+- "bel", "bellen", "telefoneer", "call", "telefoon" → intent = "bellen"
+- "sms", "stuur sms", "stuur een sms", "berichtje sturen" → intent = "sms"
+- "mail", "email", "stuur mail", "stuur een mail", "stuur email" → intent = "mail"
+- "agenda", "afspraak", "meeting", "zet in mijn agenda", "plan in", "inplannen" → intent = "agenda"
+- "herinner", "herinnering", "remind", "vergeet niet", "onthoud" → intent = "herinnering"
+- "reserveer", "reservering", "tafel", "boek" → intent = "reservering"
+- zoeken, opzoeken, informatie → intent = "informatie"
+- kopen, bestellen → intent = "aankoop"
+- algemene vragen → intent = "vraag"
 
 Geef je antwoord als JSON:
 {
-    "intent": "bellen|reservering|informatie|aankoop|vraag|anders",
+    "intent": "bellen|sms|mail|agenda|herinnering|reservering|informatie|aankoop|vraag|anders",
     "entities": {
         "phone_number": "telefoonnummer indien genoemd",
-        "venue": "naam indien genoemd",
+        "contact_name": "naam van persoon/contact (bijv. 'jan', 'mam', 'de dokter')",
+        "venue": "restaurant/locatie naam indien genoemd",
         "date": "datum indien genoemd",
         "time": "tijd indien genoemd",
         "party_size": "aantal indien genoemd",
+        "message_body": "de tekst/inhoud van het SMS of mail bericht",
+        "email_address": "e-mailadres indien genoemd",
+        "subject": "onderwerp voor mail indien genoemd",
+        "event_summary": "titel van agenda afspraak indien relevant",
+        "event_start": "starttijd afspraak (ISO of beschrijving)",
+        "event_end": "eindtijd afspraak indien genoemd",
         "other": {}
     },
     "urgency": "hoog|normaal|laag",

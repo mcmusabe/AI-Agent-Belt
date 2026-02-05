@@ -164,6 +164,7 @@ class VoiceAgent:
         max_duration_seconds: int = 300,
         phone_number_id: Optional[str] = None,
         enable_retry: bool = True,
+        validate_number: bool = True,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
@@ -196,6 +197,18 @@ class VoiceAgent:
                 "error": "Geen Vapi telefoonnummer geconfigureerd (VAPI_PHONE_NUMBER_ID).",
                 "status_code": 400
             }
+
+        # Preflight: valideer nummer als Twilio credentials beschikbaar zijn
+        preflight = None
+        if validate_number:
+            preflight = await self.lookup_phone_number(phone_clean)
+            if preflight.get("success") and preflight.get("valid") is False:
+                return {
+                    "success": False,
+                    "error": "Telefoonnummer ongeldig of niet bereikbaar volgens Twilio Lookup.",
+                    "status_code": 400,
+                    "preflight": preflight,
+                }
 
         # Voice: ELEVENLABS_VOICE_ID uit .env heeft voorrang; anders fallback (rachel of doorgegeven voice_id)
         env_voice = (self.settings.elevenlabs_voice_id or "").strip()
@@ -254,9 +267,13 @@ class VoiceAgent:
 
         # Execute met retry logic
         if enable_retry:
-            return await self._execute_call_with_retry(payload, phone_number, metadata)
+            result = await self._execute_call_with_retry(payload, phone_number, metadata)
         else:
-            return await self._execute_call(payload, phone_number, metadata)
+            result = await self._execute_call(payload, phone_number, metadata)
+
+        if preflight is not None:
+            result["preflight"] = preflight
+        return result
 
     def _validate_call_params(
         self, phone_number: str, first_message: str, system_prompt: str
@@ -293,6 +310,44 @@ class VoiceAgent:
     def _clean_phone_number(self, phone_number: str) -> str:
         """Normaliseer telefoonnummer naar strikt E.164 voor Vapi."""
         return normalize_e164(phone_number)
+
+    async def lookup_phone_number(self, phone_number: str) -> Dict[str, Any]:
+        """
+        Preflight: valideer telefoonnummer via Twilio Lookup (optioneel).
+        """
+        sid = self.settings.twilio_account_sid
+        token = self.settings.twilio_auth_token
+        if not sid or not token:
+            return {"success": False, "error": "Twilio credentials ontbreken"}
+
+        phone_clean = normalize_e164(phone_number)
+        if not phone_clean:
+            return {"success": False, "error": "Ongeldig nummer"}
+
+        url = f"https://lookups.twilio.com/v2/PhoneNumbers/{phone_clean}"
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                auth=(sid, token),
+                params={"Fields": "line_type_intelligence"},
+                timeout=20.0
+            )
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "error": response.text,
+                "status_code": response.status_code
+            }
+
+        data = response.json()
+        line_info = data.get("line_type_intelligence") or {}
+        return {
+            "success": True,
+            "valid": data.get("valid"),
+            "country": data.get("country_code"),
+            "line_type": line_info.get("type"),
+            "carrier": line_info.get("carrier_name")
+        }
 
     def _build_call_payload(
         self,
@@ -630,8 +685,11 @@ ALS HET NIET LUKT:
         time: str
     ) -> str:
         """Genereer een duidelijke openingszin"""
-        # Duidelijke, professionele opening - geen variatie nodig
-        return f"Goedendag, ik wil graag een tafel reserveren voor {party_size} personen op {date} om {time}. Is dat mogelijk?"
+        # Duidelijke, professionele opening met iets meer context
+        return (
+            f"Goedendag, ik bel even om te reserveren op naam van {customer_name}. "
+            f"Het gaat om {party_size} personen op {date} om {time}. Is dat mogelijk?"
+        )
     
     async def get_call_status(self, call_id: str) -> Dict[str, Any]:
         """

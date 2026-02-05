@@ -12,7 +12,7 @@ Start met: uvicorn src.main:app --reload
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 import asyncio
 import logging
@@ -24,6 +24,10 @@ from .channels.telegram import start_telegram_bot
 from .agents.browser import BrowserAgent, quick_browser_task
 from .agents.voice import VoiceAgent
 from .agents.planner import PlannerAgent
+from .tools.google_calendar import create_calendar_event
+from .tools.gmail import send_email
+from .tools.sms import send_sms as sms_send_func
+from .memory.supabase import get_memory_system
 
 
 # Initialiseer FastAPI app
@@ -34,10 +38,15 @@ app = FastAPI(
 )
 
 # CORS middleware
+settings = get_settings()
+origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
+if not origins:
+    origins = ["*"]
+allow_all = "*" in origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"] if allow_all else origins,
+    allow_credentials=False if allow_all else True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,6 +61,7 @@ class TaskRequest(BaseModel):
     """Algemeen taakverzoek"""
     task: str
     user_id: Optional[str] = "api_user"
+    confirmed: bool = False
 
 
 class ReservationRequest(BaseModel):
@@ -78,6 +88,32 @@ class CallRequest(BaseModel):
     special_requests: Optional[str] = None
 
 
+class CalendarEventRequest(BaseModel):
+    """Create a calendar event"""
+    summary: str
+    start_iso: str
+    end_iso: str
+    timezone: str = "Europe/Amsterdam"
+    description: Optional[str] = None
+    location: Optional[str] = None
+    attendees: Optional[List[str]] = None
+
+
+class EmailRequest(BaseModel):
+    """Send an email via Gmail API"""
+    to_email: str
+    subject: str
+    body_text: str
+    body_html: Optional[str] = None
+    from_email: Optional[str] = None
+
+
+class SmsRequest(BaseModel):
+    """Verstuur een SMS via Twilio"""
+    to_number: str
+    body: str
+
+
 # === ENDPOINTS ===
 
 @app.get("/")
@@ -92,8 +128,11 @@ async def root():
             "POST /task": "Voer een algemene taak uit",
             "POST /reserve": "Maak een reservering",
             "POST /call": "Bel een restaurant",
+            "POST /sms/send": "Verstuur een SMS",
+            "POST /email/send": "Verstuur een e-mail",
+            "POST /calendar/event": "Maak een agenda-afspraak",
             "GET /whatsapp/webhook": "WhatsApp verificatie",
-            "POST /whatsapp/webhook": "WhatsApp berichten"
+            "POST /whatsapp/webhook": "WhatsApp berichten",
         }
     }
 
@@ -109,7 +148,8 @@ async def execute_task(request: TaskRequest):
     try:
         result = await process_request(
             user_message=request.task,
-            user_id=request.user_id
+            user_id=request.user_id,
+            confirmed=request.confirmed
         )
         return {
             "success": True,
@@ -148,13 +188,25 @@ async def make_reservation(request: ReservationRequest):
                 return {"success": True, "method": "online", "result": result}
         
         # Fallback naar telefoon (of direct als use_phone=True)
-        if request.phone:
+        if not request.phone:
             # We hebben een telefoonnummer van de venue nodig
             return {
                 "success": False,
                 "message": "Telefonisch reserveren vereist het telefoonnummer van het restaurant",
                 "suggestion": "Geef het telefoonnummer mee in een /call request"
             }
+
+        call_result = await voice_agent.call_restaurant_for_reservation(
+            restaurant_name=request.venue_name,
+            phone_number=request.phone,
+            date=request.date,
+            time=request.time,
+            party_size=request.party_size,
+            customer_name=request.name,
+            special_requests=request.special_requests,
+            be_persistent=True
+        )
+        return {"success": call_result.get("success", False), "method": "phone", "result": call_result}
         
         return {
             "success": False,
@@ -184,6 +236,29 @@ async def call_restaurant(request: CallRequest):
         special_requests=request.special_requests,
         be_persistent=True
     )
+
+    # Log call in Supabase (if configured)
+    settings = get_settings()
+    if result.get("success") and settings.supabase_url and settings.supabase_anon_key:
+        try:
+            call_id = result.get("call_id")
+            if call_id:
+                memory = get_memory_system()
+                await memory.log_call(
+                    telegram_id=None,
+                    call_id=call_id,
+                    phone_number=request.phone_number,
+                    call_type="restaurant_reservation",
+                    metadata={
+                        "source": "api",
+                        "restaurant": request.restaurant_name,
+                        "date": request.date,
+                        "time": request.time,
+                        "party_size": request.party_size,
+                    }
+                )
+        except Exception:
+            pass
     
     return result
 
@@ -303,6 +378,59 @@ async def browser_task(request: TaskRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/calendar/event")
+async def calendar_event(request: CalendarEventRequest):
+    """Maak een event in Google Calendar"""
+    try:
+        event = create_calendar_event(
+            summary=request.summary,
+            start_iso=request.start_iso,
+            end_iso=request.end_iso,
+            timezone=request.timezone,
+            description=request.description,
+            location=request.location,
+            attendees=request.attendees
+        )
+        return {"success": True, "event": event}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/email/send")
+async def email_send(request: EmailRequest):
+    """Stuur een e-mail via Gmail API"""
+    try:
+        result = send_email(
+            to_email=request.to_email,
+            subject=request.subject,
+            body_text=request.body_text,
+            body_html=request.body_html,
+            from_email=request.from_email
+        )
+        return {"success": True, "message": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/sms/send")
+async def sms_send(request: SmsRequest):
+    """Verstuur een SMS via Twilio"""
+    try:
+        result = await sms_send_func(
+            to_number=request.to_number,
+            body=request.body,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health")
 async def health_check():
     """Gedetailleerde health check"""
@@ -311,6 +439,9 @@ async def health_check():
     checks = {
         "anthropic": bool(settings.anthropic_api_key),
         "vapi": bool(settings.vapi_private_key),
+        "twilio_sms": bool(settings.twilio_sms_number or settings.twilio_messaging_service_sid),
+        "gmail": bool(settings.google_refresh_token and settings.gmail_from_email),
+        "google_calendar": bool(settings.google_refresh_token),
         "telegram": bool(settings.telegram_bot_token),
         "whatsapp": bool(settings.whatsapp_token),
         "supabase": bool(settings.supabase_url),
@@ -333,10 +464,17 @@ async def startup():
     global telegram_task
     settings = get_settings()
     
+    sms_ok = bool(settings.twilio_sms_number or settings.twilio_messaging_service_sid)
+    gmail_ok = bool(settings.google_refresh_token and settings.gmail_from_email)
+    calendar_ok = bool(settings.google_refresh_token)
+
     print("🚀 Connect Smart gestart!")
     print(f"   - Debug mode: {settings.debug}")
     print(f"   - Anthropic: {'✅' if settings.anthropic_api_key else '❌'}")
     print(f"   - Vapi: {'✅' if settings.vapi_private_key else '❌'}")
+    print(f"   - SMS (Twilio): {'✅' if sms_ok else '⚠️ Niet geconfigureerd'}")
+    print(f"   - Gmail: {'✅' if gmail_ok else '⚠️ Niet geconfigureerd'}")
+    print(f"   - Google Calendar: {'✅' if calendar_ok else '⚠️ Niet geconfigureerd'}")
     print(f"   - Telegram: {'✅' if settings.telegram_bot_token else '❌'}")
     print(f"   - WhatsApp: {'✅' if settings.whatsapp_token else '⚠️ Niet geconfigureerd'}")
     

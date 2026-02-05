@@ -14,6 +14,24 @@ from ..orchestrator.graph import process_request
 
 router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 
+_pending_confirmations: Dict[str, Dict[str, Any]] = {}
+
+def _store_confirmation(user_id: str, message: str):
+    _pending_confirmations[user_id] = {
+        "message": message,
+    }
+
+def _get_confirmation(user_id: str) -> Optional[Dict[str, Any]]:
+    return _pending_confirmations.get(user_id)
+
+def _clear_confirmation(user_id: str):
+    _pending_confirmations.pop(user_id, None)
+
+def _is_yes(text: str) -> bool:
+    return text.strip().lower() in {"ja", "yes", "ok", "oke", "doe maar", "ga door", "bevestig"}
+
+def _is_no(text: str) -> bool:
+    return text.strip().lower() in {"nee", "no", "stop", "annuleer", "cancel"}
 
 class WhatsAppMessage(BaseModel):
     """Inkomend WhatsApp bericht"""
@@ -128,12 +146,32 @@ async def receive_webhook(request: Request):
         
         # Log het bericht
         print(f"📱 Bericht van {message.from_number}: {message.text}")
-        
-        # Verwerk via de agent orchestrator
-        response_text = await process_request(
-            user_message=message.text,
-            user_id=message.from_number
-        )
+
+        pending = _get_confirmation(message.from_number)
+        if pending and _is_yes(message.text):
+            _clear_confirmation(message.from_number)
+            response_data = await process_request(
+                user_message=pending.get("message", ""),
+                user_id=message.from_number,
+                confirmed=True
+            )
+        elif pending and _is_no(message.text):
+            _clear_confirmation(message.from_number)
+            response_data = {"response": "❌ Geannuleerd. Zeg maar als ik iets anders kan doen."}
+        else:
+            if pending:
+                _clear_confirmation(message.from_number)
+            # Verwerk via de agent orchestrator
+            response_data = await process_request(
+                user_message=message.text,
+                user_id=message.from_number
+            )
+
+        response_text = response_data.get("response") if isinstance(response_data, dict) else str(response_data)
+
+        if isinstance(response_data, dict) and response_data.get("needs_confirmation"):
+            pending_message = response_data.get("pending_action") or message.text
+            _store_confirmation(message.from_number, pending_message)
         
         # Stuur response terug
         await send_whatsapp_message(

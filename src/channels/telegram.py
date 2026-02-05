@@ -8,10 +8,12 @@ import asyncio
 import logging
 import tempfile
 import os
+from uuid import uuid4
 from typing import Optional, Dict, Any
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -48,6 +50,7 @@ class TelegramBot:
         self.memory = None
         self.voice_agent = VoiceAgent()
         self._pending_calls: Dict[str, Dict[str, Any]] = {}  # call_id -> {chat_id, user_id, ...}
+        self._pending_confirmations: Dict[str, Dict[str, Any]] = {}  # token -> {user_id, chat_id, message}
         self.openai_client = None
         
         # Initialize memory if Supabase is configured
@@ -73,16 +76,25 @@ class TelegramBot:
 
 Ik ben je persoonlijke AI assistent. Ik kan:
 
-📍 *Reserveringen maken*
-"Reserveer een tafel voor 2 bij De Kas morgenavond om 19:00"
+📞 *Bellen*
+"Bel Restaurant De Kas om te vragen of ze plek hebben"
+
+📱 *SMS sturen*
+"SMS Jan dat ik om 3 uur kom"
+
+📧 *E-mail sturen*
+"Mail Jan de notulen van de meeting"
+
+📅 *Agenda beheren*
+"Zet morgen om 10:00 een meeting in mijn agenda"
 
 🔍 *Informatie zoeken*
 "Wat zijn de beste Italiaanse restaurants in Amsterdam?"
 
-📞 *Restaurants bellen* (binnenkort)
-"Bel Restaurant X om te vragen of ze plek hebben"
+📍 *Reserveringen maken*
+"Reserveer een tafel voor 2 bij De Kas morgenavond om 19:00"
 
-💡 *Tip:* Gewoon in normale taal typen wat je wilt!
+💡 *Tip:* Sla contacten op en typ gewoon "bel Jan" of "sms mam"!
         """
         await update.message.reply_text(
             welcome_message,
@@ -96,12 +108,12 @@ Ik ben je persoonlijke AI assistent. Ik kan:
 
 *Voorbeelden van wat je kunt vragen:*
 
-🍽️ "Reserveer een tafel voor 4 bij Ciel Bleu"
-
 📞 "Bel De Kas om te vragen of ze plek hebben"
-
+📱 "SMS Jan dat ik later kom"
+📧 "Mail jan@example.com de offerte"
+📅 "Zet morgen om 10:00 een meeting in mijn agenda"
+🍽️ "Reserveer een tafel voor 4 bij Ciel Bleu"
 🔎 "Wat zijn goede Italiaanse restaurants?"
-
 🎤 Stuur een spraakbericht en ik versta je!
 
 *Commands:*
@@ -113,11 +125,12 @@ Ik ben je persoonlijke AI assistent. Ik kan:
 /voorkeuren - Bekijk wat ik heb geleerd
 
 *Tips:*
-• Sla contacten op en typ "bel Jan" om te bellen
+• Sla contacten op: `/contact add Jan +31612345678 persoonlijk`
+• Typ dan "bel Jan", "sms Jan" of "mail Jan"
 • Ik leer je voorkeuren automatisch
 • Je krijgt transcripts na elk telefoongesprek
 
-Typ gewoon wat je wilt! 🚀
+Typ gewoon wat je wilt!
         """
         await update.message.reply_text(
             help_message,
@@ -128,16 +141,23 @@ Typ gewoon wat je wilt! 🚀
         """Handler voor /status command"""
         settings = self.settings
         
+        sms_ok = bool(settings.twilio_sms_number or settings.twilio_messaging_service_sid)
+        gmail_ok = bool(settings.google_refresh_token and settings.gmail_from_email)
+        calendar_ok = bool(settings.google_refresh_token)
+
         status_message = f"""
 ⚙️ *Systeem Status*
 
 ✅ Telegram: Verbonden
 {"✅" if settings.anthropic_api_key else "❌"} AI (Claude): {"Actief" if settings.anthropic_api_key else "Niet geconfigureerd"}
 {"✅" if settings.vapi_private_key else "❌"} Voice (Vapi): {"Actief" if settings.vapi_private_key else "Niet geconfigureerd"}
+{"✅" if sms_ok else "❌"} SMS (Twilio): {"Actief" if sms_ok else "Niet geconfigureerd"}
+{"✅" if gmail_ok else "❌"} E-mail (Gmail): {"Actief" if gmail_ok else "Niet geconfigureerd"}
+{"✅" if calendar_ok else "❌"} Agenda (Google): {"Actief" if calendar_ok else "Niet geconfigureerd"}
 {"✅" if self.memory else "❌"} Geheugen (Supabase): {"Actief" if self.memory else "Niet geconfigureerd"}
 
-🤖 Bot: Connect Smart (@ai_agent_belt_bot)
-📡 Versie: 1.2.0
+🤖 Bot: Connect Smart (@ai\_agent\_belt\_bot)
+📡 Versie: 2.0.0
         """
         await update.message.reply_text(
             status_message,
@@ -172,7 +192,7 @@ Typ gewoon wat je wilt! 🚀
                     "📇 *Contacten*\n\n"
                     "Je hebt nog geen contacten opgeslagen.\n\n"
                     "*Voeg een contact toe:*\n"
-                    "`/contact add Jan Bakker +31612345678 restaurant`\n\n"
+                    "`/contact add Jan +31612345678 jan@email.nl persoonlijk`\n\n"
                     "*Categorieën:* restaurant, bedrijf, persoonlijk, overig",
                     parse_mode="Markdown"
                 )
@@ -201,8 +221,14 @@ Typ gewoon wat je wilt! 🚀
                 for c in cat_contacts:
                     name = c.get("name", "Onbekend")
                     phone = c.get("phone_number", "")
-                    phone_str = f" - {phone}" if phone else ""
-                    message += f"  • {name}{phone_str}\n"
+                    email = c.get("email", "")
+                    details = []
+                    if phone:
+                        details.append(phone)
+                    if email:
+                        details.append(email)
+                    detail_str = f" - {', '.join(details)}" if details else ""
+                    message += f"  • {name}{detail_str}\n"
                 message += "\n"
             
             message += "_Tip: Typ gewoon \"bel Jan\" om te bellen_"
@@ -213,29 +239,47 @@ Typ gewoon wat je wilt! 🚀
         action = args[0].lower()
         
         # Voeg contact toe
+        # Syntax: /contact add <naam> <telefoon> [email] [categorie]
         if action == "add" and len(args) >= 3:
             name = args[1]
-            phone = args[2] if len(args) > 2 else None
-            category = args[3] if len(args) > 3 else "overig"
-            
+            phone = None
+            email = None
+            category = "overig"
+
+            # Parse overige args: detect telefoon, email, categorie
+            for arg in args[2:]:
+                if "@" in arg:
+                    email = arg
+                elif arg.startswith("+") or arg[0].isdigit():
+                    phone = arg
+                elif arg.lower() in ("restaurant", "bedrijf", "persoonlijk", "overig"):
+                    category = arg.lower()
+
             # Normaliseer telefoonnummer
             if phone and not phone.startswith("+"):
                 if phone.startswith("0"):
                     phone = "+31" + phone[1:]
-            
+
             try:
                 contact = await self.memory.add_contact(
                     telegram_id=user_id,
                     name=name,
                     phone_number=phone,
-                    category=category
+                    email=email,
+                    category=category,
                 )
+                lines = [
+                    f"✅ *Contact toegevoegd*\n",
+                    f"👤 {name}",
+                ]
+                if phone:
+                    lines.append(f"📞 {phone}")
+                if email:
+                    lines.append(f"📧 {email}")
+                lines.append(f"📁 {category}")
                 await update.message.reply_text(
-                    f"✅ *Contact toegevoegd*\n\n"
-                    f"👤 {name}\n"
-                    f"📞 {phone or 'Geen nummer'}\n"
-                    f"📁 {category}",
-                    parse_mode="Markdown"
+                    "\n".join(lines),
+                    parse_mode="Markdown",
                 )
             except Exception as e:
                 logger.error(f"Error adding contact: {e}")
@@ -284,7 +328,7 @@ Typ gewoon wat je wilt! 🚀
         await update.message.reply_text(
             "📇 *Contact Commando's*\n\n"
             "`/contact` - Toon alle contacten\n"
-            "`/contact add <naam> <telefoon> [categorie]` - Voeg toe\n"
+            "`/contact add <naam> <telefoon> [email] [categorie]` - Voeg toe\n"
             "`/contact zoek <naam>` - Zoek\n"
             "`/contact del <naam>` - Verwijder\n\n"
             "*Categorieën:* restaurant, bedrijf, persoonlijk, overig",
@@ -484,6 +528,25 @@ Typ gewoon wat je wilt! 🚀
             await update.message.reply_text(
                 "❌ Kon herinnering niet opslaan. Probeer later opnieuw."
             )
+
+    def _store_confirmation(self, user_id: str, chat_id: str, message: str) -> str:
+        token = uuid4().hex
+        self._pending_confirmations[token] = {
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "message": message
+        }
+        return token
+
+    def _find_pending_confirmation(self, user_id: str):
+        for token, data in self._pending_confirmations.items():
+            if data.get("user_id") == user_id:
+                return token, data
+        return None, None
+
+    def _clear_confirmation(self, token: Optional[str]):
+        if token:
+            self._pending_confirmations.pop(token, None)
     
     async def poll_call_transcript(self, call_id: str, chat_id: int, user_id: str):
         """
@@ -591,6 +654,20 @@ Typ gewoon wat je wilt! 🚀
                                     )
                             except Exception as e:
                                 logger.warning(f"⚠️ Kon transcript niet opslaan: {e}")
+
+                    # Update call status in memory
+                    if self.memory:
+                        try:
+                            await self.memory.update_call_status(
+                                call_id=call_id,
+                                status=status,
+                                ended_reason=ended_reason or None,
+                                duration_seconds=duration,
+                                transcript=transcript or None,
+                                summary=summary or None
+                            )
+                        except Exception as e:
+                            logger.warning(f"⚠️ Kon call status niet bijwerken: {e}")
                     
                     # Verwijder uit pending calls
                     self._pending_calls.pop(call_id, None)
@@ -608,12 +685,100 @@ Typ gewoon wat je wilt! 🚀
             )
         self._pending_calls.pop(call_id, None)
     
+    async def handle_confirmation_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler voor inline bevestigingsknoppen"""
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        await query.answer()
+
+        if not query.data.startswith("confirm:"):
+            return
+
+        parts = query.data.split(":", 2)
+        if len(parts) != 3:
+            return
+
+        action, token = parts[1], parts[2]
+        pending = self._pending_confirmations.get(token)
+        if not pending:
+            await query.edit_message_text("Deze bevestiging is verlopen. Stuur je verzoek opnieuw.")
+            return
+
+        user_id = str(update.effective_user.id)
+        if pending.get("user_id") != user_id:
+            await query.edit_message_text("Deze bevestiging hoort bij een andere gebruiker.")
+            return
+
+        # Verwijder pending confirmation
+        self._clear_confirmation(token)
+
+        if action == "no":
+            await query.edit_message_text("❌ Geannuleerd. Zeg maar als ik iets anders kan doen.")
+            return
+
+        if action == "yes":
+            result = await process_request(
+                user_message=pending.get("message", ""),
+                user_id=user_id,
+                confirmed=True
+            )
+            response = result.get("response", "Er ging iets mis.")
+            await query.edit_message_text(response)
+
+            call_id = result.get("call_id")
+            chat_id = pending.get("chat_id") or (query.message.chat_id if query.message else None)
+            if call_id and chat_id:
+                self._pending_calls[call_id] = {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "started_at": asyncio.get_event_loop().time()
+                }
+                asyncio.create_task(
+                    self.poll_call_transcript(call_id, chat_id, user_id)
+                )
+            return
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler voor normale tekstberichten"""
         user = update.effective_user
         message_text = update.message.text
         user_id = str(user.id)
         chat_id = update.effective_chat.id
+
+        lower = message_text.strip().lower()
+        yes_words = {"ja", "yes", "oke", "ok", "doe maar", "ga door", "bevestig"}
+        no_words = {"nee", "no", "stop", "annuleer", "cancel"}
+        token, pending = self._find_pending_confirmation(user_id)
+
+        if pending:
+            if lower in yes_words:
+                self._clear_confirmation(token)
+                result = await process_request(
+                    user_message=pending.get("message", ""),
+                    user_id=user_id,
+                    confirmed=True
+                )
+                response = result.get("response", "Er ging iets mis.")
+                await update.message.reply_text(response)
+                call_id = result.get("call_id")
+                if call_id:
+                    self._pending_calls[call_id] = {
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "started_at": asyncio.get_event_loop().time()
+                    }
+                    asyncio.create_task(
+                        self.poll_call_transcript(call_id, chat_id, user_id)
+                    )
+                return
+            if lower in no_words:
+                self._clear_confirmation(token)
+                await update.message.reply_text("❌ Geannuleerd. Zeg maar als ik iets anders kan doen.")
+                return
+            # Nieuwe taak: vervang oude bevestiging
+            self._clear_confirmation(token)
         
         logger.info(f"📱 Bericht van {user.first_name} ({user_id}): {message_text}")
         
@@ -657,6 +822,8 @@ Typ gewoon wat je wilt! 🚀
             # Haal response en call_id uit het resultaat
             response = result.get("response", "Er ging iets mis.")
             call_id = result.get("call_id")
+            voice_result = result.get("voice_result") or {}
+            voice_result = result.get("voice_result") or {}
             
             # Sla assistant response op in memory
             if self.memory and conversation_id:
@@ -669,7 +836,19 @@ Typ gewoon wat je wilt! 🚀
                 except Exception as e:
                     logger.warning(f"⚠️ Memory save error: {e}")
             
-            # Stuur response terug
+            # Stuur response terug (met bevestigingsknoppen indien nodig)
+            if result.get("needs_confirmation"):
+                pending_message = result.get("pending_action") or message_text
+                token = self._store_confirmation(user_id, str(chat_id), pending_message)
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Ja, doen", callback_data=f"confirm:yes:{token}"),
+                        InlineKeyboardButton("❌ Nee, stop", callback_data=f"confirm:no:{token}"),
+                    ]
+                ])
+                await update.message.reply_text(response, reply_markup=keyboard)
+                return
+
             await update.message.reply_text(response)
             
             logger.info(f"📤 Response naar {user.first_name}: {response[:100]}...")
@@ -686,6 +865,19 @@ Typ gewoon wat je wilt! 🚀
                 asyncio.create_task(
                     self.poll_call_transcript(call_id, chat_id, user_id)
                 )
+
+                # Log call in memory
+                if self.memory:
+                    try:
+                        await self.memory.log_call(
+                            telegram_id=user_id,
+                            call_id=call_id,
+                            phone_number=voice_result.get("phone_number") or "unknown",
+                            call_type="general",
+                            metadata={"source": "telegram"}
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ Kon call niet loggen: {e}")
             
         except Exception as e:
             logger.error(f"❌ Error bij verwerken bericht: {e}")
@@ -802,6 +994,18 @@ Typ gewoon wat je wilt! 🚀
                 except Exception as e:
                     logger.warning(f"⚠️ Memory save error: {e}")
             
+            if result.get("needs_confirmation"):
+                pending_message = result.get("pending_action") or message_text
+                token = self._store_confirmation(user_id, str(chat_id), pending_message)
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Ja, doen", callback_data=f"confirm:yes:{token}"),
+                        InlineKeyboardButton("❌ Nee, stop", callback_data=f"confirm:no:{token}"),
+                    ]
+                ])
+                await update.message.reply_text(response, reply_markup=keyboard)
+                return
+
             await update.message.reply_text(response)
             
             # Start call transcript polling indien nodig
@@ -815,6 +1019,18 @@ Typ gewoon wat je wilt! 🚀
                 asyncio.create_task(
                     self.poll_call_transcript(call_id, chat_id, user_id)
                 )
+
+                if self.memory:
+                    try:
+                        await self.memory.log_call(
+                            telegram_id=user_id,
+                            call_id=call_id,
+                            phone_number=voice_result.get("phone_number") or "unknown",
+                            call_type="general",
+                            metadata={"source": "telegram", "type": "voice"}
+                        )
+                    except Exception as e:
+                        logger.warning(f"⚠️ Kon call niet loggen: {e}")
             
         except Exception as e:
             logger.error(f"❌ Error bij verwerken spraakbericht: {e}")
@@ -855,6 +1071,9 @@ Typ gewoon wat je wilt! 🚀
         self.application.add_handler(CommandHandler("contact", self.contact_command))
         self.application.add_handler(CommandHandler("voorkeuren", self.preferences_command))
         self.application.add_handler(CommandHandler("herinner", self.reminder_command))
+
+        # Confirmation buttons
+        self.application.add_handler(CallbackQueryHandler(self.handle_confirmation_callback, pattern=r"^confirm:"))
         
         # Message handler voor alle tekst berichten
         self.application.add_handler(

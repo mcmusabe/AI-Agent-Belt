@@ -43,11 +43,29 @@ class Settings(BaseSettings):
     
     # OpenAI (voor Whisper speech-to-text)
     openai_api_key: str = Field("", description="OpenAI API key voor Whisper")
+
+    # Twilio (optioneel) - voor preflight nummercheck + SMS
+    twilio_account_sid: str = Field("", description="Twilio Account SID (optioneel)")
+    twilio_auth_token: str = Field("", description="Twilio Auth Token (optioneel)")
+    twilio_sms_number: str = Field("", description="Twilio SMS afzendernummer (E.164)")
+    twilio_messaging_service_sid: str = Field("", description="Twilio Messaging Service SID (A2P)")
     
     # Server
     host: str = Field("0.0.0.0", description="Server host")
     port: int = Field(8000, description="Server port")
     debug: bool = Field(True, description="Debug mode")
+    cors_allow_origins: str = Field(
+        "*",
+        description="Comma-separated CORS origins, or '*' for all"
+    )
+
+    # Google OAuth (Calendar + Gmail)
+    google_client_id: str = Field("", description="Google OAuth client ID")
+    google_client_secret: str = Field("", description="Google OAuth client secret")
+    google_redirect_uri: str = Field("", description="Google OAuth redirect URI")
+    google_refresh_token: str = Field("", description="Google OAuth refresh token")
+    google_calendar_id: str = Field("primary", description="Google Calendar ID")
+    gmail_from_email: str = Field("", description="Default Gmail from address")
     
     model_config = {
         "env_file": ".env",
