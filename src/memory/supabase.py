@@ -1,5 +1,5 @@
 """
-Supabase Memory System - Lange-termijn geheugen voor AI Agent Belt.
+Supabase Memory System - Lange-termijn geheugen voor Connect Smart.
 
 Slaat op:
 - Gebruikersprofielen en voorkeuren
@@ -505,8 +505,166 @@ class MemorySystem:
         
         return True
     
+    # === CALL LOGGING ===
+
+    async def log_call(
+        self,
+        telegram_id: Optional[str],
+        call_id: str,
+        phone_number: str,
+        call_type: str,
+        metadata: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Log een uitgaande call.
+
+        Args:
+            telegram_id: Telegram user ID (kan None zijn voor API calls)
+            call_id: Vapi call ID
+            phone_number: Gebeld nummer
+            call_type: Type call (restaurant_reservation, general, etc.)
+            metadata: Extra data (restaurant naam, datum, etc.)
+        """
+        user_id = None
+        if telegram_id:
+            user = await self.get_or_create_user(telegram_id)
+            user_id = user["id"]
+
+        call_data = {
+            "user_id": user_id,
+            "call_id": call_id,
+            "phone_number": phone_number,
+            "call_type": call_type,
+            "status": "initiated",
+            "metadata": metadata or {}
+        }
+
+        result = self.client.table("agent_calls").insert(call_data).execute()
+        return result.data[0] if result.data else {}
+
+    async def update_call_status(
+        self,
+        call_id: str,
+        status: str,
+        ended_reason: Optional[str] = None,
+        duration_seconds: Optional[int] = None,
+        transcript: Optional[str] = None,
+        summary: Optional[str] = None,
+        success: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """
+        Update de status van een call.
+
+        Args:
+            call_id: Vapi call ID
+            status: Nieuwe status (ringing, in-progress, ended)
+            ended_reason: Reden van beëindiging
+            duration_seconds: Duur van het gesprek
+            transcript: Volledige transcript
+            summary: AI-gegenereerde samenvatting
+            success: Of de call succesvol was (bijv. reservering gelukt)
+        """
+        updates = {
+            "status": status,
+            "updated_at": datetime.utcnow().isoformat()
+        }
+
+        if ended_reason:
+            updates["ended_reason"] = ended_reason
+        if duration_seconds is not None:
+            updates["duration_seconds"] = duration_seconds
+        if transcript:
+            updates["transcript"] = transcript
+        if summary:
+            updates["summary"] = summary
+        if success is not None:
+            updates["success"] = success
+        if status == "ended":
+            updates["ended_at"] = datetime.utcnow().isoformat()
+
+        self.client.table("agent_calls").update(updates).eq(
+            "call_id", call_id
+        ).execute()
+
+        result = self.client.table("agent_calls").select("*").eq(
+            "call_id", call_id
+        ).execute()
+
+        return result.data[0] if result.data else {}
+
+    async def get_call_history(
+        self,
+        telegram_id: str,
+        limit: int = 20,
+        call_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Haal call geschiedenis op voor een gebruiker"""
+        user = await self.get_or_create_user(telegram_id)
+
+        query = self.client.table("agent_calls").select("*").eq(
+            "user_id", user["id"]
+        )
+
+        if call_type:
+            query = query.eq("call_type", call_type)
+
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return result.data
+
+    async def get_call_stats(
+        self,
+        telegram_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Haal call statistieken op.
+
+        Args:
+            telegram_id: Filter op gebruiker (None = alle gebruikers)
+
+        Returns:
+            Dict met statistieken (totaal, succes rate, gem. duur, etc.)
+        """
+        query = self.client.table("agent_calls").select("*")
+
+        if telegram_id:
+            user = await self.get_or_create_user(telegram_id)
+            query = query.eq("user_id", user["id"])
+
+        result = query.execute()
+        calls = result.data
+
+        if not calls:
+            return {
+                "total_calls": 0,
+                "success_rate": 0,
+                "avg_duration": 0,
+                "calls_by_type": {}
+            }
+
+        total = len(calls)
+        successful = sum(1 for c in calls if c.get("success"))
+        durations = [c.get("duration_seconds", 0) for c in calls if c.get("duration_seconds")]
+
+        # Group by type
+        by_type = {}
+        for call in calls:
+            ct = call.get("call_type", "unknown")
+            if ct not in by_type:
+                by_type[ct] = {"total": 0, "successful": 0}
+            by_type[ct]["total"] += 1
+            if call.get("success"):
+                by_type[ct]["successful"] += 1
+
+        return {
+            "total_calls": total,
+            "successful_calls": successful,
+            "success_rate": round(successful / total * 100, 1) if total > 0 else 0,
+            "avg_duration_seconds": round(sum(durations) / len(durations), 1) if durations else 0,
+            "calls_by_type": by_type
+        }
+
     # === CONTEXT BUILDING ===
-    
+
     async def get_user_context(self, telegram_id: str) -> Dict[str, Any]:
         """
         Bouw volledige context voor een gebruiker.

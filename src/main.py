@@ -1,5 +1,5 @@
 """
-AI Agent Belt - Main Application
+Connect Smart - Main Application
 
 Een autonoom AI-systeem dat:
 - Opdrachten ontvangt via WhatsApp of API
@@ -9,11 +9,13 @@ Een autonoom AI-systeem dat:
 
 Start met: uvicorn src.main:app --reload
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 import asyncio
+import logging
 
 from .config import get_settings
 from .orchestrator.graph import process_request
@@ -26,7 +28,7 @@ from .agents.planner import PlannerAgent
 
 # Initialiseer FastAPI app
 app = FastAPI(
-    title="AI Agent Belt",
+    title="Connect Smart",
     description="Autonoom AI-systeem voor reserveringen en taken",
     version="1.0.0"
 )
@@ -82,10 +84,10 @@ class CallRequest(BaseModel):
 async def root():
     """Health check en info"""
     return {
-        "name": "AI Agent Belt",
+        "name": "Connect Smart",
         "version": "1.0.0",
         "status": "running",
-        "telegram_bot": "@ai_agent_belt_bot",
+        "telegram_bot": "Connect Smart (@ai_agent_belt_bot)",
         "endpoints": {
             "POST /task": "Voer een algemene taak uit",
             "POST /reserve": "Maak een reservering",
@@ -200,6 +202,93 @@ async def get_call_transcript(call_id: str):
     return await voice_agent.get_call_transcript(call_id)
 
 
+@app.get("/call/{call_id}/wait")
+async def wait_for_call_result(call_id: str, max_wait: int = 180):
+    """
+    Wacht tot een call klaar is en retourneer het geanalyseerde resultaat.
+
+    Args:
+        call_id: ID van de call
+        max_wait: Maximale wachttijd in seconden (default 180)
+    """
+    voice_agent = VoiceAgent()
+    return await voice_agent.wait_and_analyze_call(call_id, max_wait)
+
+
+# === VAPI WEBHOOK ===
+
+webhook_logger = logging.getLogger("vapi_webhook")
+
+# In-memory store voor webhook events (voor demo; in productie: Redis/DB)
+_webhook_events: dict = {}
+
+
+@app.post("/vapi/webhook")
+async def vapi_webhook(request: Request):
+    """
+    Webhook endpoint voor Vapi call events.
+
+    Vapi stuurt events zoals:
+    - call-started
+    - call-ended
+    - transcript-ready
+    - speech-update
+
+    Configureer in Vapi dashboard: https://jouw-server.com/vapi/webhook
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"status": "error", "message": "Invalid JSON"}
+
+    event_type = payload.get("message", {}).get("type") or payload.get("type", "unknown")
+    call_data = payload.get("message", {}).get("call") or payload.get("call", {})
+    call_id = call_data.get("id") or payload.get("call_id", "unknown")
+
+    webhook_logger.info(f"Vapi webhook: {event_type} for call {call_id}")
+
+    # Store event
+    if call_id not in _webhook_events:
+        _webhook_events[call_id] = []
+
+    _webhook_events[call_id].append({
+        "type": event_type,
+        "timestamp": datetime.utcnow().isoformat(),
+        "data": payload
+    })
+
+    # Handle specifieke events
+    if event_type == "call-ended":
+        ended_reason = call_data.get("endedReason", "unknown")
+        duration = call_data.get("duration", 0)
+        webhook_logger.info(
+            f"Call {call_id} ended: reason={ended_reason}, duration={duration}s"
+        )
+
+        # TODO: Stuur notificatie naar gebruiker via Telegram/WhatsApp
+
+    elif event_type == "transcript":
+        transcript = payload.get("message", {}).get("transcript", "")
+        webhook_logger.debug(f"Transcript update for {call_id}: {transcript[:100]}...")
+
+    elif event_type == "status-update":
+        status = payload.get("message", {}).get("status", "unknown")
+        webhook_logger.info(f"Call {call_id} status: {status}")
+
+    return {"status": "received", "call_id": call_id, "event": event_type}
+
+
+@app.get("/vapi/webhook/events/{call_id}")
+async def get_webhook_events(call_id: str):
+    """Haal webhook events op voor een specifieke call"""
+    events = _webhook_events.get(call_id, [])
+    return {
+        "call_id": call_id,
+        "event_count": len(events),
+        "events": events
+    }
+
+
 @app.post("/browser/task")
 async def browser_task(request: TaskRequest):
     """
@@ -244,7 +333,7 @@ async def startup():
     global telegram_task
     settings = get_settings()
     
-    print("🚀 AI Agent Belt gestart!")
+    print("🚀 Connect Smart gestart!")
     print(f"   - Debug mode: {settings.debug}")
     print(f"   - Anthropic: {'✅' if settings.anthropic_api_key else '❌'}")
     print(f"   - Vapi: {'✅' if settings.vapi_private_key else '❌'}")
@@ -254,7 +343,7 @@ async def startup():
     # Start Telegram bot als achtergrondtaak
     if settings.telegram_bot_token:
         print("🤖 Telegram bot wordt gestart...")
-        print("   📱 Bot: @ai_agent_belt_bot")
+        print("   📱 Bot: Connect Smart (@ai_agent_belt_bot)")
         telegram_task = asyncio.create_task(start_telegram_bot())
 
 
@@ -271,7 +360,7 @@ async def shutdown():
         except asyncio.CancelledError:
             pass
     
-    print("👋 AI Agent Belt afgesloten")
+    print("👋 Connect Smart afgesloten")
 
 
 # Voor directe uitvoering
