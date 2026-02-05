@@ -21,7 +21,12 @@ class Settings(BaseSettings):
 
     # ElevenLabs voice (optioneel): Voice ID uit ElevenLabs Voice Library voor Nederlands accent.
     # API key voor ElevenLabs zet je in het Vapi-dashboard onder Provider Keys.
-    elevenlabs_voice_id: str = Field("", description="ElevenLabs voice ID (e.g. Dutch accent)")
+    # Zet in .env: ELEVENLABS_VOICE_ID=jouw_voice_id
+    elevenlabs_voice_id: str = Field(
+        default="",
+        description="ElevenLabs voice ID (e.g. Dutch accent)",
+        validation_alias="ELEVENLABS_VOICE_ID",
+    )
     
     # Telegram Bot
     telegram_bot_token: str = Field("", description="Telegram Bot API token")

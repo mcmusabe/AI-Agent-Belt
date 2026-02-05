@@ -54,6 +54,24 @@ def _ended_reason_to_message(reason: Optional[str]) -> str:
     return ENDED_REASON_MESSAGES.get(reason) or f"Reden: {reason}"
 
 
+def normalize_e164(phone: str) -> str:
+    """
+    Normaliseer naar strikt E.164: alleen + en cijfers.
+    Nederlandse 06 wordt +31 6 ...; verwijdert spaties, streepjes, onzichtbare tekens.
+    """
+    if not phone:
+        return ""
+    # Alleen + en cijfers behouden (geen spaties/streepjes/unicode)
+    cleaned = "".join(c for c in str(phone).strip() if c == "+" or c.isdigit())
+    if not cleaned:
+        return ""
+    rest = cleaned[1:] if cleaned.startswith("+") else cleaned
+    # Nederlandse 06 -> +31 6 ...
+    if rest.startswith("0"):
+        rest = "31" + rest[1:]
+    return "+" + rest
+
+
 # Retry configuratie
 RETRY_CONFIG = {
     "max_retries": 3,
@@ -179,11 +197,13 @@ class VoiceAgent:
                 "status_code": 400
             }
 
-        # Voice: voorkeur voor geconfigureerde ElevenLabs-stem (bijv. Nederlandse accent uit Voice Library)
-        effective_voice_id = (
-            self.settings.elevenlabs_voice_id.strip()
-            or self.ELEVENLABS_VOICES.get(voice_id, voice_id)
-        )
+        # Voice: ELEVENLABS_VOICE_ID uit .env heeft voorrang; anders fallback (rachel of doorgegeven voice_id)
+        env_voice = (self.settings.elevenlabs_voice_id or "").strip()
+        effective_voice_id = env_voice or self.ELEVENLABS_VOICES.get(voice_id, voice_id)
+        if env_voice:
+            logger.info("Using ELEVENLABS_VOICE_ID from config: %s", env_voice[:8] + "..." if len(env_voice) > 8 else env_voice)
+        else:
+            logger.debug("No ELEVENLABS_VOICE_ID set, using voice: %s", effective_voice_id)
 
         # Als er een Vapi assistant is geconfigureerd, gebruik die.
         if self.settings.vapi_assistant_id:
@@ -271,8 +291,8 @@ class VoiceAgent:
         return None
 
     def _clean_phone_number(self, phone_number: str) -> str:
-        """Normaliseer telefoonnummer naar E.164"""
-        return phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+        """Normaliseer telefoonnummer naar strikt E.164 voor Vapi."""
+        return normalize_e164(phone_number)
 
     def _build_call_payload(
         self,

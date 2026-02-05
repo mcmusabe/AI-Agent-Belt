@@ -13,7 +13,7 @@ import asyncio
 
 from ..config import get_settings
 from ..agents.browser import BrowserAgent
-from ..agents.voice import VoiceAgent
+from ..agents.voice import VoiceAgent, normalize_e164
 from ..agents.planner import PlannerAgent
 from ..memory.supabase import get_memory_system
 
@@ -228,12 +228,12 @@ Wees vriendelijk en persoonlijk.""")
         entities = intent.get("entities", {})
         user_id = state.get("user_id", "default")
         
-        # Extract telefoonnummer uit de taak
+        # Extract telefoonnummer uit de taak (eerste reeks cijfers met optionele +)
         phone_match = re.search(r'\+?\d[\d\s\-]{8,}', task)
-        phone_number = phone_match.group().replace(" ", "").replace("-", "") if phone_match else None
+        raw_number = phone_match.group() if phone_match else None
         
         # Als geen nummer gevonden, probeer contact lookup
-        if not phone_number and settings.supabase_url and settings.supabase_anon_key:
+        if not raw_number and settings.supabase_url and settings.supabase_anon_key:
             try:
                 memory = get_memory_system()
                 # Zoek naar een naam in de taak
@@ -251,26 +251,28 @@ Wees vriendelijk en persoonlijk.""")
                         if not re.search(r'\d{5,}', potential_name):
                             contact = await memory.get_contact_by_name(user_id, potential_name)
                             if contact and contact.get("phone_number"):
-                                phone_number = contact["phone_number"]
+                                raw_number = contact["phone_number"]
                                 # Voeg contactnaam toe aan task context
                                 task = f"{task} (Contact: {contact['name']})"
                                 break
             except Exception as e:
                 pass  # Memory niet beschikbaar
         
-        if not phone_number:
+        if not raw_number:
             return {
                 **state,
                 "voice_result": {"success": False, "error": "Geen telefoonnummer gevonden in je verzoek"},
                 "messages": [AIMessage(content="❌ Ik kon geen telefoonnummer vinden. Geef een nummer op zoals: +31612345678")]
             }
         
-        # Zorg dat nummer internationaal formaat heeft
-        if not phone_number.startswith("+"):
-            if phone_number.startswith("0"):
-                phone_number = "+31" + phone_number[1:]
-            else:
-                phone_number = "+" + phone_number
+        # Strikte E.164-normalisatie (06 -> +31, alleen + en cijfers naar Vapi)
+        phone_number = normalize_e164(raw_number)
+        if not phone_number:
+            return {
+                **state,
+                "voice_result": {"success": False, "error": "Ongeldig telefoonnummer."},
+                "messages": [AIMessage(content="❌ Ongeldig telefoonnummer. Gebruik bijv. +31612345678 of 0612345678")]
+            }
         
         # Bepaal tijdstip voor begroeting
         try:
