@@ -288,27 +288,47 @@ Wees vriendelijk en persoonlijk.""")
             greeting = "Goedenavond"
         
         # Bepaal het doel van het gesprek uit de taak
-        system_prompt = f"""Je bent Sophie, de assistent van Connect Smart. Je belt namens een klant.
+        # Let op: we willen NIET dat Sophie praat over "opdrachten" of "AI".
+        # Ze moet klinken als een echte Nederlander die gewoon even belt.
+        system_prompt = f"""
+Je bent Sophie en je belt namens Connect Smart. Je belt namens een klant,
+maar je praat zoals een normale Nederlandse collega die iemand even opbelt.
 
-HUIDIGE TIJD: Het is nu {hour}:00 uur (gebruik de juiste begroeting: {greeting})
+CONTEXT:
+- Dit is in het kort wat de klant wil dat je regelt of bespreekt:
+\"\"\"{task}\"\"\"
 
-DE OPDRACHT VAN DE KLANT: {task}
+GEDRAG:
+- Doe alsof jij zelf belt. Zeg NIET dat je een AI, digitale assistent of bot bent.
+- Zeg NIET dat je een opdracht of taak uitvoert, noem ook geen "script".
+- Spreek natuurlijk Nederlands:
+  - Gebruik woorden als "hoi", "goedemorgen", "even kijken", "momentje", "oké".
+  - Korte, duidelijke zinnen. Niet te formeel.
+- Luister goed en vraag door als iets onduidelijk is.
+- Als iets niet kan, denk mee over alternatieven.
+- Vat aan het einde kort samen wat er is afgesproken.
+- Wees beleefd maar niet overdreven formeel.
 
-BELANGRIJK:
-- Spreek natuurlijk Nederlands, geen robotachtige zinnen
-- Gebruik tussenwerpingen zoals "eh...", "even kijken", "momentje"
-- Luister goed en vraag door als iets onduidelijk is
-- Als het restaurant/bedrijf vol zit, vraag naar alternatieven
-- Vat aan het einde samen wat er is afgesproken
-- Wees beleefd maar niet overdreven formeel"""
+HUIDIGE TIJD: Het is nu {hour}:00 uur (gebruik een passende begroeting zoals: {greeting}).
+"""
 
         # Pas first_message aan op basis van de taak en tijdstip
-        if "open" in task.lower():
-            first_message = f"{greeting}, u spreekt met Sophie, assistente van Connect Smart. Ik bel even om te vragen wat uw openingstijden zijn?"
-        elif "reserv" in task.lower():
-            first_message = f"{greeting}, met Sophie, assistente van Connect Smart. Ik zou graag een reservering willen maken, kan dat?"
+        lower_task = task.lower()
+        if "open" in lower_task:
+            first_message = (
+                f"{greeting}, u spreekt met Sophie van Connect Smart. "
+                f"Ik bel even om te vragen wat uw openingstijden zijn."
+            )
+        elif "reserv" in lower_task or "tafel" in lower_task:
+            first_message = (
+                f"{greeting}, met Sophie van Connect Smart. "
+                f"Ik wilde graag een reservering maken, is daar nog ruimte voor?"
+            )
         else:
-            first_message = f"{greeting}, u spreekt met Sophie, assistente van Connect Smart. Ik bel namens een klant van mij."
+            first_message = (
+                f"{greeting}, u spreekt met Sophie van Connect Smart. "
+                f"Ik bel even namens iemand die u kent, mag ik u kort iets vragen?"
+            )
         
         try:
             # ECHTE CALL via Vapi

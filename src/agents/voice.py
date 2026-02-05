@@ -178,18 +178,43 @@ class VoiceAgent:
                 "status_code": 400
             }
 
-        # Resolve voice ID
+        # Resolve voice ID (voor inline gebruik als er geen Vapi assistantId is)
         resolved_voice_id = self.ELEVENLABS_VOICES.get(voice_id, voice_id)
 
-        # Build optimized payload voor natuurlijke conversatie
-        payload = self._build_call_payload(
-            phone_clean=phone_clean,
-            first_message=first_message,
-            system_prompt=system_prompt,
-            voice_id=resolved_voice_id,
-            max_duration_seconds=max_duration_seconds,
-            phone_number_id=phone_number_id
-        )
+        # Als er een Vapi assistant is geconfigureerd, gebruik die zodat
+        # stem/model exact overeenkomen met wat je in de Vapi UI test.
+        if self.settings.vapi_assistant_id:
+            payload: Dict[str, Any] = {
+                "assistantId": self.settings.vapi_assistant_id,
+                "assistantOverrides": {
+                    "firstMessage": first_message,
+                    "model": {
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-20250514",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": system_prompt,
+                            }
+                        ],
+                        "temperature": 0.6,
+                    },
+                    # Let op: geen 'voice' hier zetten → dan gebruikt Vapi
+                    # precies de voice-config uit het dashboard (bijv. Emily).
+                },
+                "customer": {"number": phone_clean},
+                "phoneNumberId": phone_number_id,
+            }
+        else:
+            # Geen assistantId: bouw inline assistant payload met ElevenLabs voice
+            payload = self._build_call_payload(
+                phone_clean=phone_clean,
+                first_message=first_message,
+                system_prompt=system_prompt,
+                voice_id=resolved_voice_id,
+                max_duration_seconds=max_duration_seconds,
+                phone_number_id=phone_number_id,
+            )
 
         # Execute met retry logic
         if enable_retry:
@@ -244,12 +269,14 @@ class VoiceAgent:
     ) -> Dict[str, Any]:
         """Bouw geoptimaliseerde call payload voor natuurlijke gesprekken"""
 
-        # Gebruik Azure Neural voor beste Nederlandse uitspraak
-        # ElevenLabs heeft geen native Nederlandse stemmen
-        voice_config = {
-            "provider": "azure",
-            "voiceId": "nl-NL-MaartenNeural",  # Mannelijke Nederlandse stem
+        # Gebruik ElevenLabs via Vapi (zoals geconfigureerd in het dashboard).
+        # We zetten alleen de provider op 11labs; Vapi gebruikt dan het
+        # geconfigureerde model/voice (bijv. Emily) of een voiceId als die is meegegeven.
+        voice_config: Dict[str, Any] = {
+            "provider": "11labs",
         }
+        if voice_id:
+            voice_config["voiceId"] = voice_id
 
         return {
             "assistant": {
