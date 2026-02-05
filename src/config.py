@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     vapi_assistant_id: str = Field("", description="Vapi assistant ID")
     vapi_phone_number_id: str = Field("", description="Vapi phone number ID for outbound calls")
     vapi_phone_number: str = Field("", description="Vapi phone number")
+
+    # ElevenLabs voice (optioneel): Voice ID uit ElevenLabs Voice Library voor Nederlands accent.
+    # API key voor ElevenLabs zet je in het Vapi-dashboard onder Provider Keys.
+    elevenlabs_voice_id: str = Field("", description="ElevenLabs voice ID (e.g. Dutch accent)")
     
     # Telegram Bot
     telegram_bot_token: str = Field("", description="Telegram Bot API token")

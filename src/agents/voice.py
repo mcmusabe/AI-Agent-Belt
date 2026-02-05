@@ -113,13 +113,14 @@ class VoiceAgent:
 
     VAPI_BASE_URL = "https://api.vapi.ai"
 
-    # ElevenLabs stemmen - beste kwaliteit voor Nederlands
+    # ElevenLabs stemmen - fallback als ELEVENLABS_VOICE_ID niet gezet is
     ELEVENLABS_VOICES = {
         "rachel": "21m00Tcm4TlvDq8ikWAM",      # Vrouwelijk, warm (default)
         "adam": "pNInz6obpgDQGcFmaJgB",        # Mannelijk, vriendelijk
         "josh": "TxGEqnHWrfWFTfGW9XjX",        # Mannelijk, casual
         "bella": "EXAVITQu4vr4xnSDxMaL",       # Vrouwelijk, jong
     }
+    DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # rachel
 
     # Fallback: Azure Neural Nederlandse stemmen
     AZURE_VOICES = {
@@ -178,40 +179,58 @@ class VoiceAgent:
                 "status_code": 400
             }
 
-        # Resolve voice ID (voor inline gebruik als er geen Vapi assistantId is)
-        resolved_voice_id = self.ELEVENLABS_VOICES.get(voice_id, voice_id)
+        # Voice: voorkeur voor geconfigureerde ElevenLabs-stem (bijv. Nederlandse accent uit Voice Library)
+        effective_voice_id = (
+            self.settings.elevenlabs_voice_id.strip()
+            or self.ELEVENLABS_VOICES.get(voice_id, voice_id)
+        )
 
-        # Als er een Vapi assistant is geconfigureerd, gebruik die zodat
-        # stem/model exact overeenkomen met wat je in de Vapi UI test.
+        # Als er een Vapi assistant is geconfigureerd, gebruik die.
         if self.settings.vapi_assistant_id:
+            transcriber_config: Dict[str, Any] = {
+                "provider": "deepgram",
+                "language": "nl",
+                "model": "nova-2",
+                "keywords": [
+                    "broodje", "cola", "biertje", "koffie", "thee", "water",
+                    "frikandel", "kroket", "patat", "pizza", "salade", "soep",
+                    "Musabbe", "Musabi", "Connect", "Sophie",
+                ],
+                "keyterm": [
+                    "hete kip", "broodje hete kip", "een cola", "een biertje",
+                    "lunch bestelling", "wat wil je drinken",
+                ],
+            }
+            overrides: Dict[str, Any] = {
+                "firstMessage": first_message,
+                "model": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "messages": [{"role": "system", "content": system_prompt}],
+                    "temperature": 0.6,
+                },
+                "transcriber": transcriber_config,
+                "responseDelaySeconds": 0.35,
+                "silenceTimeoutSeconds": 10,
+                "llmRequestDelaySeconds": 0.15,
+            }
+            if effective_voice_id:
+                overrides["voice"] = {
+                    "provider": "11labs",
+                    "voiceId": effective_voice_id,
+                }
             payload: Dict[str, Any] = {
                 "assistantId": self.settings.vapi_assistant_id,
-                "assistantOverrides": {
-                    "firstMessage": first_message,
-                    "model": {
-                        "provider": "anthropic",
-                        "model": "claude-sonnet-4-20250514",
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": system_prompt,
-                            }
-                        ],
-                        "temperature": 0.6,
-                    },
-                    # Let op: geen 'voice' hier zetten → dan gebruikt Vapi
-                    # precies de voice-config uit het dashboard (bijv. Emily).
-                },
+                "assistantOverrides": overrides,
                 "customer": {"number": phone_clean},
                 "phoneNumberId": phone_number_id,
             }
         else:
-            # Geen assistantId: bouw inline assistant payload met ElevenLabs voice
             payload = self._build_call_payload(
                 phone_clean=phone_clean,
                 first_message=first_message,
                 system_prompt=system_prompt,
-                voice_id=resolved_voice_id,
+                voice_id=effective_voice_id,
                 max_duration_seconds=max_duration_seconds,
                 phone_number_id=phone_number_id,
             )
@@ -269,14 +288,11 @@ class VoiceAgent:
     ) -> Dict[str, Any]:
         """Bouw geoptimaliseerde call payload voor natuurlijke gesprekken"""
 
-        # Gebruik ElevenLabs via Vapi (zoals geconfigureerd in het dashboard).
-        # We zetten alleen de provider op 11labs; Vapi gebruikt dan het
-        # geconfigureerde model/voice (bijv. Emily) of een voiceId als die is meegegeven.
+        resolved_id = (voice_id or "").strip() or (self.settings.elevenlabs_voice_id or "").strip() or self.DEFAULT_VOICE_ID
         voice_config: Dict[str, Any] = {
             "provider": "11labs",
+            "voiceId": resolved_id,
         }
-        if voice_id:
-            voice_config["voiceId"] = voice_id
 
         return {
             "assistant": {
@@ -293,22 +309,25 @@ class VoiceAgent:
                     "temperature": 0.6,  # Iets lager voor consistentere responses
                 },
                 "voice": voice_config,
-                # Timing voor natuurlijk gesprek
-                "silenceTimeoutSeconds": 15,           # Korter = responsiever
-                "responseDelaySeconds": 0.6,           # Iets langer voor duidelijkheid
-                "llmRequestDelaySeconds": 0.2,         # Kleine buffer
-                "numWordsToInterruptAssistant": 3,     # Voorkom te snel onderbreken
+                # Snellere timing = natuurlijker gesprek (niet te traag)
+                "silenceTimeoutSeconds": 10,
+                "responseDelaySeconds": 0.35,
+                "llmRequestDelaySeconds": 0.15,
+                "numWordsToInterruptAssistant": 3,
                 "maxDurationSeconds": max_duration_seconds,
-                # Einde gesprek
                 "endCallMessage": "Oké, bedankt! Doei!",
                 "endCallPhrases": ["doei", "dag", "tot ziens", "bedankt", "dankjewel", "fijne dag"],
-                # Geen achtergrondgeluid
                 "backgroundSound": "off",
-                # Transcriptie settings - Deepgram Nova-2 met Nederlandse focus
+                # Transcriptie: Nederlands + woordboost voor broodje, cola, biertje, etc.
                 "transcriber": {
                     "provider": "deepgram",
                     "language": "nl",
                     "model": "nova-2",
+                    "keywords": [
+                        "broodje", "cola", "biertje", "koffie", "thee", "water",
+                        "frikandel", "kroket", "patat", "pizza", "salade", "soep",
+                    ],
+                    "keyterm": ["hete kip", "broodje hete kip", "een cola", "een biertje", "lunch bestelling"],
                 },
             },
             "customer": {

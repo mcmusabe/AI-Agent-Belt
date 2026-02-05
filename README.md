@@ -159,6 +159,10 @@ Om daadwerkelijk te kunnen bellen heb je een telefoonnummer nodig:
 2. Koop een telefoonnummer
 3. Test met de `/call` endpoint
 
+### Stem (Nederlands accent)
+
+Voor een natuurlijke Nederlandse stem: zet in `.env` de variabele `ELEVENLABS_VOICE_ID` op een Voice ID uit de [ElevenLabs Voice Library](https://elevenlabs.io/voice-library) (bijv. een Dutch voice). De **ElevenLabs API key** vul je alleen in het Vapi-dashboard in onder **Provider Keys**, niet in `.env`.
+
 ## Development
 
 ### Project Structuur
