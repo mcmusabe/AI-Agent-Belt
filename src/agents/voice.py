@@ -243,6 +243,14 @@ class VoiceAgent:
         phone_number_id: str
     ) -> Dict[str, Any]:
         """Bouw geoptimaliseerde call payload voor natuurlijke gesprekken"""
+
+        # Gebruik Azure Neural voor beste Nederlandse uitspraak
+        # ElevenLabs heeft geen native Nederlandse stemmen
+        voice_config = {
+            "provider": "azure",
+            "voiceId": "nl-NL-MaartenNeural",  # Mannelijke Nederlandse stem
+        }
+
         return {
             "assistant": {
                 "firstMessage": first_message,
@@ -255,29 +263,21 @@ class VoiceAgent:
                             "content": system_prompt
                         }
                     ],
-                    # Snellere response voor vloeiend gesprek
-                    "temperature": 0.7,
+                    "temperature": 0.6,  # Iets lager voor consistentere responses
                 },
-                "voice": {
-                    "provider": "11labs",
-                    "voiceId": voice_id,
-                    # Optimalisaties voor natuurlijke spraak
-                    "stability": 0.5,           # Meer variatie = natuurlijker
-                    "similarityBoost": 0.75,    # Behoud stemkarakter
-                    "useSpeakerBoost": True,    # Betere kwaliteit
-                },
+                "voice": voice_config,
                 # Timing voor natuurlijk gesprek
-                "silenceTimeoutSeconds": 20,           # Korter = responsiever
-                "responseDelaySeconds": 0.4,           # Snelle maar niet te snelle response
-                "llmRequestDelaySeconds": 0.1,         # Minimale LLM delay
-                "numWordsToInterruptAssistant": 2,     # Makkelijk onderbreken
+                "silenceTimeoutSeconds": 15,           # Korter = responsiever
+                "responseDelaySeconds": 0.6,           # Iets langer voor duidelijkheid
+                "llmRequestDelaySeconds": 0.2,         # Kleine buffer
+                "numWordsToInterruptAssistant": 3,     # Voorkom te snel onderbreken
                 "maxDurationSeconds": max_duration_seconds,
                 # Einde gesprek
-                "endCallMessage": "Oké, fijn. Dankjewel hè, doei!",
-                "endCallPhrases": ["doei", "dag", "tot ziens", "bedankt", "dankjewel"],
+                "endCallMessage": "Oké, bedankt! Doei!",
+                "endCallPhrases": ["doei", "dag", "tot ziens", "bedankt", "dankjewel", "fijne dag"],
                 # Geen achtergrondgeluid
                 "backgroundSound": "off",
-                # Transcriptie settings
+                # Transcriptie settings - Deepgram Nova-2 met Nederlandse focus
                 "transcriber": {
                     "provider": "deepgram",
                     "language": "nl",
@@ -514,70 +514,51 @@ class VoiceAgent:
         special_requests: Optional[str],
         be_persistent: bool
     ) -> str:
-        """Bouw een natuurlijke, menselijke system prompt"""
+        """Bouw een duidelijke, Nederlandse system prompt"""
 
         persistence_block = ""
         if be_persistent:
             persistence_block = """
-    ALS ZE VOL ZITTEN - geef niet meteen op, maar blijf relaxed:
-    - "Ah jammer zeg... en ietsje later op de avond dan, lukt dat wel?"
-    - "Hmm oké... en als we aan de bar gaan zitten ofzo?"
-    - "Is er misschien een wachtlijst? Dan zetten we ons daarop"
-    - "En de dag erna, is daar nog wel plek?"
-    Niet pusherig, gewoon vriendelijk vragen. Als het echt niet kan, accepteer het.
-    """
+ALS ZE VOL ZITTEN:
+- Vraag vriendelijk of een andere tijd wel kan
+- Vraag of er een wachtlijst is
+- Geef niet direct op, maar wees niet pusherig
+"""
 
         special_block = ""
         if special_requests:
-            special_block = f"""
-    SPECIALE WENSEN om te noemen:
-    "{special_requests}"
-    Noem dit op een natuurlijke manier, niet als een lijstje opdreuren.
-    """
+            special_block = f"\nSPECIALE WENSEN: {special_requests}\n"
 
-        return f"""Je bent een normale persoon die een restaurant belt om te reserveren.
+        return f"""Je bent een vriendelijke medewerker die belt om een reservering te maken.
 Je belt namens {customer_name}.
 
-=== HEEL BELANGRIJK: ZO PRAAT JE ===
-Je bent GEEN robot of AI-assistent. Je bent gewoon iemand die even belt.
+BELANGRIJKE REGELS:
+1. Spreek duidelijk en rustig Nederlands
+2. Herhaal jezelf NOOIT - als iemand je niet verstaat, zeg het anders
+3. Luister goed naar wat de ander zegt voordat je reageert
+4. Geef korte, directe antwoorden
+5. Stel jezelf NIET voor als AI of assistent of robot
 
-STEM & TOON:
-- Praat zoals je tegen een vriend zou praten, maar dan beleefd
-- Rustig tempo, niet gehaast
-- Af en toe een "ehm" of korte pauze is prima, dat is menselijk
-- Reageer op wat ze zeggen: "Ah oké", "O mooi", "Ja tuurlijk", "Top"
+HOE JE PRAAT:
+- Normaal, vriendelijk Nederlands
+- Korte zinnen, geen lange verhalen
+- Zeg "hallo" of "goedendag", niet "hey"
+- Als je iets niet verstaat: "Sorry, kunt u dat herhalen?"
 
-WAT JE ZEGT:
-- Kort en bondig, geen lange zinnen
-- "Hoi" of "Hey hallo" - nooit "Goedendag" of "Met wie spreek ik"
-- "Kan ik..." niet "Zou ik eventueel kunnen..."
-- "Voor X personen" niet "Met een gezelschap van X personen"
-- Bevestig dingen: "Oké dus [datum] om [tijd], top"
-
-WAT JE NIET DOET:
-- Nooit jezelf voorstellen als AI of assistent
-- Geen formele zinnen of zakelijk taalgebruik
-- Niet herhalen wat je al gezegd hebt
-- Geen opsommingen of bulletpoints uitspreken
-
-=== DE RESERVERING ===
+DE RESERVERING:
 - Restaurant: {restaurant_name}
 - Datum: {date}
-- Tijd: rond {time}
-- Aantal: {party_size} personen
-- Op naam van: {customer_name}
-{special_block}
-{persistence_block}
-=== AFRONDEN ===
-Als het gelukt is:
-- Herhaal kort wat is afgesproken ("Dus [datum] om [tijd] voor [aantal], op naam van [naam]")
-- Vraag of ze een bevestiging mailen/sms'en
-- "Top, dankjewel!" of "Oké perfect, bedankt hè!"
-- Gewoon normaal afsluiten, niet overdreven beleefd
+- Tijd: {time}
+- Aantal personen: {party_size}
+- Naam: {customer_name}
+{special_block}{persistence_block}
+GESPREK AFRONDEN:
+- Bevestig de reservering: "Dus {date} om {time} voor {party_size} personen op naam van {customer_name}"
+- Bedank en hang op: "Prima, dank u wel. Tot ziens!"
 
-Als het niet lukt:
-- "Ah jammer, dan proberen we het ergens anders. Bedankt in ieder geval!"
-- Niet te lang doorgaan"""
+ALS HET NIET LUKT:
+- "Oké, dan proberen we het ergens anders. Bedankt!"
+- Niet blijven doorgaan"""
 
     def _build_natural_opening(
         self,
@@ -586,17 +567,9 @@ Als het niet lukt:
         date: str,
         time: str
     ) -> str:
-        """Genereer een natuurlijke openingszin met wat variatie"""
-        import random
-
-        openings = [
-            f"Hoi, ik bel even voor een reservering. {party_size} personen, {date} rond {time}, kan dat?",
-            f"Hey hallo, ik wil graag een tafeltje reserveren. Voor {party_size} personen, {date} om {time} ongeveer. Hebben jullie plek?",
-            f"Hoi, met mij. Ik wil graag reserveren voor {date}, rond {time}. We zijn met z'n {party_size}en. Lukt dat?",
-            f"Hey, ik bel voor een reservering. {date}, een uur of {time}, voor {party_size} personen. Is er nog plek?",
-        ]
-
-        return random.choice(openings)
+        """Genereer een duidelijke openingszin"""
+        # Duidelijke, professionele opening - geen variatie nodig
+        return f"Goedendag, ik wil graag een tafel reserveren voor {party_size} personen op {date} om {time}. Is dat mogelijk?"
     
     async def get_call_status(self, call_id: str) -> Dict[str, Any]:
         """
