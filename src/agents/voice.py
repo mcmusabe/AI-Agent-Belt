@@ -187,6 +187,7 @@ class VoiceAgent:
 
         # Als er een Vapi assistant is geconfigureerd, gebruik die.
         if self.settings.vapi_assistant_id:
+            # keyterm alleen toegestaan bij Deepgram nova-3/flux; bij nova-2 weglaten
             transcriber_config: Dict[str, Any] = {
                 "provider": "deepgram",
                 "language": "nl",
@@ -195,10 +196,6 @@ class VoiceAgent:
                     "broodje", "cola", "biertje", "koffie", "thee", "water",
                     "frikandel", "kroket", "patat", "pizza", "salade", "soep",
                     "Musabbe", "Musabi", "Connect", "Sophie",
-                ],
-                "keyterm": [
-                    "hete kip", "broodje hete kip", "een cola", "een biertje",
-                    "lunch bestelling", "wat wil je drinken",
                 ],
             }
             overrides: Dict[str, Any] = {
@@ -318,7 +315,7 @@ class VoiceAgent:
                 "endCallMessage": "Oké, bedankt! Doei!",
                 "endCallPhrases": ["doei", "dag", "tot ziens", "bedankt", "dankjewel", "fijne dag"],
                 "backgroundSound": "off",
-                # Transcriptie: Nederlands + woordboost voor broodje, cola, biertje, etc.
+                # Transcriptie: Nederlands + keywords (keyterm alleen bij nova-3/flux)
                 "transcriber": {
                     "provider": "deepgram",
                     "language": "nl",
@@ -327,7 +324,6 @@ class VoiceAgent:
                         "broodje", "cola", "biertje", "koffie", "thee", "water",
                         "frikandel", "kroket", "patat", "pizza", "salade", "soep",
                     ],
-                    "keyterm": ["hete kip", "broodje hete kip", "een cola", "een biertje", "lunch bestelling"],
                 },
             },
             "customer": {
