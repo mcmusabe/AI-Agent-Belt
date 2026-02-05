@@ -1,4 +1,4 @@
-# AI Agent Belt - Dockerfile for Railway deployment
+# Connect Smart - Dockerfile for Railway deployment
 FROM python:3.11-slim
 
 # Set working directory

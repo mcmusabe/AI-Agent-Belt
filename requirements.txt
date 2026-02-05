@@ -1,4 +1,4 @@
-# AI Agent Belt - Dependencies
+# Connect Smart - Dependencies
 
 # Core AI Framework
 langgraph>=1.0.0

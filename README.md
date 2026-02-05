@@ -1,4 +1,4 @@
-# AI Agent Belt 🤖📞
+# Connect Smart 🤖📞
 
 Een autonoom AI-systeem dat opdrachten ontvangt via WhatsApp, websites kan bedienen, en zelfstandig kan bellen naar restaurants en bedrijven.
 
@@ -163,7 +163,7 @@ Om daadwerkelijk te kunnen bellen heb je een telefoonnummer nodig:
 
 ### Project Structuur
 ```
-agent-belt/
+connect-smart/
 ├── src/
 │   ├── main.py              # FastAPI app
 │   ├── config.py            # Settings

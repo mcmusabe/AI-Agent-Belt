@@ -150,7 +150,7 @@ def create_agent_graph():
         if intent.get("intent") in ["informatie", "vraag"]:
             # Beantwoord direct met Claude
             response = await llm.ainvoke([
-                HumanMessage(content=f"""Je bent een behulpzame Nederlandse AI assistent genaamd AI Agent Belt.
+                HumanMessage(content=f"""Je bent een behulpzame Nederlandse AI assistent van Connect Smart.
 {context_prompt}
 
 Beantwoord de volgende vraag zo goed mogelijk:
@@ -189,7 +189,7 @@ Geef een nuttig en informatief antwoord in het Nederlands. Wees vriendelijk en p
             # Als het een configuratie fout is, gebruik Claude
             if "BROWSER_USE_API_KEY" in error_msg or "API_KEY" in error_msg:
                 response = await llm.ainvoke([
-                    HumanMessage(content=f"""Je bent een behulpzame Nederlandse AI assistent genaamd AI Agent Belt.
+                    HumanMessage(content=f"""Je bent een behulpzame Nederlandse AI assistent van Connect Smart.
 {context_prompt}
 
 De gebruiker vroeg: {task}
@@ -288,7 +288,7 @@ Wees vriendelijk en persoonlijk.""")
             greeting = "Goedenavond"
         
         # Bepaal het doel van het gesprek uit de taak
-        system_prompt = f"""Je bent Sophie, een vriendelijke Nederlandse assistente. Je belt namens een klant.
+        system_prompt = f"""Je bent Sophie, de assistent van Connect Smart. Je belt namens een klant.
 
 HUIDIGE TIJD: Het is nu {hour}:00 uur (gebruik de juiste begroeting: {greeting})
 
@@ -304,11 +304,11 @@ BELANGRIJK:
 
         # Pas first_message aan op basis van de taak en tijdstip
         if "open" in task.lower():
-            first_message = f"{greeting}, u spreekt met Sophie. Ik bel even om te vragen wat uw openingstijden zijn?"
+            first_message = f"{greeting}, u spreekt met Sophie, assistente van Connect Smart. Ik bel even om te vragen wat uw openingstijden zijn?"
         elif "reserv" in task.lower():
-            first_message = f"{greeting}, met Sophie. Ik zou graag een reservering willen maken, kan dat?"
+            first_message = f"{greeting}, met Sophie, assistente van Connect Smart. Ik zou graag een reservering willen maken, kan dat?"
         else:
-            first_message = f"{greeting}, u spreekt met Sophie. Ik bel namens een klant van mij."
+            first_message = f"{greeting}, u spreekt met Sophie, assistente van Connect Smart. Ik bel namens een klant van mij."
         
         try:
             # ECHTE CALL via Vapi

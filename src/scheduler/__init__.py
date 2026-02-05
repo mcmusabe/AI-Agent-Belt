@@ -1,5 +1,5 @@
 """
-Scheduler module voor AI Agent Belt.
+Scheduler module voor Connect Smart.
 """
 from .reminders import ReminderScheduler, get_reminder_scheduler
 

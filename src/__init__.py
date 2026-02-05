@@ -1,1 +1,1 @@
-# AI Agent Belt - Een autonoom AI-systeem voor reserveringen en taken
+# Connect Smart - Een autonoom AI-systeem voor reserveringen en taken

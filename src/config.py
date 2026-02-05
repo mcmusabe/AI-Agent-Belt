@@ -1,5 +1,5 @@
 """
-Configuratie en environment variabelen voor AI Agent Belt.
+Configuratie en environment variabelen voor Connect Smart.
 """
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # WhatsApp Business API
     whatsapp_token: str = Field("", description="WhatsApp Business API token")
     whatsapp_phone_number_id: str = Field("", description="WhatsApp phone number ID")
-    whatsapp_verify_token: str = Field("agent-belt-verify", description="Webhook verify token")
+    whatsapp_verify_token: str = Field("connect-smart-verify", description="Webhook verify token")
     
     # Supabase
     supabase_url: str = Field("", description="Supabase project URL")

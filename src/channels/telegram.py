@@ -21,7 +21,7 @@ from telegram.ext import (
 from ..config import get_settings
 from ..orchestrator.graph import process_request
 from ..memory.supabase import get_memory_system
-from ..agents.voice import VoiceAgent
+from ..agents.voice import VoiceAgent, _ended_reason_to_message
 from ..scheduler.reminders import get_reminder_scheduler
 
 # OpenAI voor Whisper (optioneel)
@@ -69,7 +69,7 @@ class TelegramBot:
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler voor /start command"""
         welcome_message = """
-🤖 *Welkom bij AI Agent Belt!*
+🤖 *Welkom bij Connect Smart!*
 
 Ik ben je persoonlijke AI assistent. Ik kan:
 
@@ -136,7 +136,7 @@ Typ gewoon wat je wilt! 🚀
 {"✅" if settings.vapi_private_key else "❌"} Voice (Vapi): {"Actief" if settings.vapi_private_key else "Niet geconfigureerd"}
 {"✅" if self.memory else "❌"} Geheugen (Supabase): {"Actief" if self.memory else "Niet geconfigureerd"}
 
-🤖 Bot: @ai_agent_belt_bot
+🤖 Bot: Connect Smart (@ai_agent_belt_bot)
 📡 Versie: 1.2.0
         """
         await update.message.reply_text(
@@ -515,36 +515,40 @@ Typ gewoon wat je wilt! 🚀
                 
                 # Als call beëindigd is
                 if status in ["ended", "failed", "busy", "no-answer"]:
-                    # Haal transcript op
+                    # Haal transcript + endedReason op (zodat we altijd kunnen uitleggen waarom)
                     transcript_result = await self.voice_agent.get_call_transcript(call_id)
                     
-                    # Bouw samenvatting
                     transcript = transcript_result.get("transcript", "")
                     summary = transcript_result.get("summary", "")
                     duration = transcript_result.get("duration", 0)
+                    ended_reason = transcript_result.get("endedReason", "")
+                    reason_message = _ended_reason_to_message(ended_reason)
+                    if ended_reason:
+                        logger.info("📞 Call %s ended: reason=%s duration=%ss", call_id, ended_reason, duration)
                     
                     if status == "ended":
                         if transcript or summary:
                             message = f"📞 *Gesprek beëindigd*\n\n"
                             message += f"⏱️ Duur: {int(duration)} seconden\n\n"
-                            
+                            if int(duration) == 0 and reason_message:
+                                message += f"ℹ️ {reason_message}\n\n"
                             if summary:
                                 message += f"📝 *Samenvatting:*\n{summary}\n\n"
-                            
                             if transcript:
-                                # Beperk transcript tot 3000 tekens (Telegram limiet)
                                 if len(transcript) > 3000:
                                     transcript = transcript[:3000] + "...\n(transcript ingekort)"
                                 message += f"💬 *Transcript:*\n{transcript}"
                         else:
-                            message = f"📞 *Gesprek beëindigd* (⏱️ {int(duration)}s)\n\n" \
-                                      f"Geen transcript beschikbaar."
+                            message = f"📞 *Gesprek beëindigd* (⏱️ {int(duration)}s)\n\n"
+                            message += f"Geen transcript beschikbaar.\n\n"
+                            if reason_message:
+                                message += f"ℹ️ {reason_message}"
                     elif status == "failed":
-                        message = "❌ *Gesprek mislukt*\n\nDe verbinding kon niet worden gemaakt."
+                        message = f"❌ *Gesprek mislukt*\n\n{reason_message}"
                     elif status == "busy":
-                        message = "📞 *Lijn bezet*\n\nHet nummer was in gesprek. Probeer later opnieuw."
+                        message = f"📞 *Lijn bezet*\n\n{reason_message}"
                     elif status == "no-answer":
-                        message = "📞 *Niet opgenomen*\n\nEr werd niet opgenomen. Probeer later opnieuw."
+                        message = f"📞 *Niet opgenomen*\n\n{reason_message}"
                     
                     # Stuur naar Telegram
                     if self.application and self.application.bot:
@@ -864,7 +868,7 @@ Typ gewoon wat je wilt! 🚀
         app = self.build_application()
         
         logger.info("🤖 Telegram bot gestart!")
-        logger.info("📱 Bot: @ai_agent_belt_bot")
+        logger.info("📱 Bot: Connect Smart (@ai_agent_belt_bot)")
         
         # Initialize en start polling
         await app.initialize()
@@ -893,7 +897,7 @@ Typ gewoon wat je wilt! 🚀
         """Start de bot (blocking)"""
         app = self.build_application()
         logger.info("🤖 Telegram bot gestart!")
-        logger.info("📱 Bot: @ai_agent_belt_bot")
+        logger.info("📱 Bot: Connect Smart (@ai_agent_belt_bot)")
         app.run_polling(drop_pending_updates=True)
 
 

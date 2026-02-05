@@ -1,5 +1,5 @@
 """
-Demo script om de AI Agent Belt te testen.
+Demo script om Connect Smart te testen.
 
 Voert verschillende taken uit om te laten zien wat het systeem kan.
 """
@@ -135,7 +135,7 @@ async def demo_restaurant_call_preview():
 
 async def main():
     """Run alle demos"""
-    print("🚀 AI Agent Belt - Demo Suite")
+    print("🚀 Connect Smart - Demo Suite")
     print("="*60)
     
     settings = get_settings()
