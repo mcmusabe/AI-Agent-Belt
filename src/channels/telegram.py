@@ -488,6 +488,7 @@ Typ gewoon wat je wilt! 🚀
     async def poll_call_transcript(self, call_id: str, chat_id: int, user_id: str):
         """
         Poll voor call transcript en stuur naar gebruiker wanneer klaar.
+        Stuur tussentijdse updates: gaat over, opgenomen / in gesprek.
         
         Args:
             call_id: Vapi call ID
@@ -496,6 +497,8 @@ Typ gewoon wat je wilt! 🚀
         """
         max_attempts = 60  # Max 5 minuten (60 * 5 sec)
         attempt = 0
+        notified_ringing = False
+        notified_in_progress = False
         
         while attempt < max_attempts:
             await asyncio.sleep(5)  # Wacht 5 seconden tussen polls
@@ -512,6 +515,23 @@ Typ gewoon wat je wilt! 🚀
                 status = call_data.get("status", "")
                 
                 logger.info(f"📞 Call {call_id} status: {status} (attempt {attempt})")
+                
+                # Tussentijdse status-updates naar Telegram (één keer per status)
+                if self.application and self.application.bot:
+                    if status == "ringing" and not notified_ringing:
+                        notified_ringing = True
+                        await self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text="📞 _Gaat over…_",
+                            parse_mode="Markdown"
+                        )
+                    elif status == "in-progress" and not notified_in_progress:
+                        notified_in_progress = True
+                        await self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text="📞 _Opgenomen – in gesprek met de agent._",
+                            parse_mode="Markdown"
+                        )
                 
                 # Als call beëindigd is
                 if status in ["ended", "failed", "busy", "no-answer"]:
