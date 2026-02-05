@@ -311,6 +311,9 @@ GEDRAG:
 - Vat aan het einde kort samen wat er is afgesproken.
 - Wees beleefd maar niet overdreven formeel.
 
+ANTWOORDAPPARAAT/VOICEMAIL:
+- Als je een bandje of voicemail hoort (bijv. "uw stem wordt niet waargenomen", "als u klaar bent beëindig dit gesprek", "na de toon", "toets 1", "voor meer opties"), zeg dan één keer kort: "Geen probleem, ik bel later nog eens. Doei." en beëindig het gesprek. Ga niet meerdere keren "hallo" zeggen tegen een bandje.
+
 HUIDIGE TIJD: Het is nu {hour}:00 uur (gebruik een passende begroeting zoals: {greeting}).
 """
 
