@@ -6,11 +6,20 @@ Veel simpeler dan WhatsApp - geen webhook of verificatie nodig!
 """
 import asyncio
 import logging
+import re as _re_module
 import tempfile
 import os
+from dataclasses import dataclass, field
+from enum import Enum
 from uuid import uuid4
-from typing import Optional, Dict, Any
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Optional, Dict, Any, List
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -25,6 +34,73 @@ from ..orchestrator.graph import process_request
 from ..memory.supabase import get_memory_system
 from ..agents.voice import VoiceAgent, _ended_reason_to_message
 from ..scheduler.reminders import get_reminder_scheduler
+
+
+# ── Wizard data structuren ──────────────────────────────────────────
+
+class WizardType(str, Enum):
+    BELLEN = "bellen"
+    SMS = "sms"
+    MAIL = "mail"
+    AGENDA = "agenda"
+
+
+class WizardStep(str, Enum):
+    SELECT_CONTACT = "select_contact"
+    ENTER_NUMBER = "enter_number"
+    ENTER_EMAIL = "enter_email"
+    ENTER_MESSAGE = "enter_message"
+    ENTER_SUBJECT = "enter_subject"
+    ENTER_TITLE = "enter_title"
+    ENTER_DATETIME = "enter_datetime"
+    CONFIRM = "confirm"
+
+
+# Stappen per wizard type
+WIZARD_FLOWS: Dict[WizardType, list] = {
+    WizardType.BELLEN: [
+        WizardStep.SELECT_CONTACT,
+        WizardStep.ENTER_MESSAGE,
+        WizardStep.CONFIRM,
+    ],
+    WizardType.SMS: [
+        WizardStep.SELECT_CONTACT,
+        WizardStep.ENTER_MESSAGE,
+        WizardStep.CONFIRM,
+    ],
+    WizardType.MAIL: [
+        WizardStep.SELECT_CONTACT,
+        WizardStep.ENTER_SUBJECT,
+        WizardStep.ENTER_MESSAGE,
+        WizardStep.CONFIRM,
+    ],
+    WizardType.AGENDA: [
+        WizardStep.ENTER_TITLE,
+        WizardStep.ENTER_DATETIME,
+        WizardStep.CONFIRM,
+    ],
+}
+
+
+@dataclass
+class WizardState:
+    """State voor een actieve wizard conversatie"""
+    wizard_type: WizardType
+    current_step: WizardStep
+    user_id: str
+    chat_id: int
+    started_at: float
+    # Verzamelde data
+    contact_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    email_address: Optional[str] = None
+    message_body: Optional[str] = None
+    subject: Optional[str] = None
+    event_title: Optional[str] = None
+    event_datetime: Optional[str] = None
+
+
+WIZARD_TIMEOUT = 300  # 5 minuten
 
 # OpenAI voor Whisper (optioneel)
 try:
@@ -51,6 +127,7 @@ class TelegramBot:
         self.voice_agent = VoiceAgent()
         self._pending_calls: Dict[str, Dict[str, Any]] = {}  # call_id -> {chat_id, user_id, ...}
         self._pending_confirmations: Dict[str, Dict[str, Any]] = {}  # token -> {user_id, chat_id, message}
+        self._pending_wizards: Dict[str, WizardState] = {}  # user_id -> WizardState
         self.openai_client = None
         
         # Initialize memory if Supabase is configured
@@ -69,36 +146,42 @@ class TelegramBot:
             except Exception as e:
                 logger.warning(f"⚠️ OpenAI/Whisper niet beschikbaar: {e}")
     
+    @staticmethod
+    def _get_main_menu_keyboard() -> ReplyKeyboardMarkup:
+        """Persistent menu keyboard onderaan het scherm"""
+        keyboard = [
+            [KeyboardButton("📞 Bellen"), KeyboardButton("📱 SMS"), KeyboardButton("📧 Mail")],
+            [KeyboardButton("📅 Agenda"), KeyboardButton("📇 Contacten"), KeyboardButton("❓ Help")],
+        ]
+        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler voor /start command"""
         welcome_message = """
 🤖 *Welkom bij Connect Smart!*
 
-Ik ben je persoonlijke AI assistent. Ik kan:
+Ik ben je persoonlijke AI assistent. Kies een actie uit het menu hieronder, of typ gewoon wat je wilt!
 
-📞 *Bellen*
-"Bel Restaurant De Kas om te vragen of ze plek hebben"
+📞 *Bellen* — Ik bel namens jou
+📱 *SMS* — Stuur een berichtje
+📧 *Mail* — Verstuur een e-mail
+📅 *Agenda* — Plan een afspraak
+📇 *Contacten* — Beheer je contacten
 
-📱 *SMS sturen*
-"SMS Jan dat ik om 3 uur kom"
-
-📧 *E-mail sturen*
-"Mail Jan de notulen van de meeting"
-
-📅 *Agenda beheren*
-"Zet morgen om 10:00 een meeting in mijn agenda"
-
-🔍 *Informatie zoeken*
-"Wat zijn de beste Italiaanse restaurants in Amsterdam?"
-
-📍 *Reserveringen maken*
-"Reserveer een tafel voor 2 bij De Kas morgenavond om 19:00"
-
-💡 *Tip:* Sla contacten op en typ gewoon "bel Jan" of "sms mam"!
+💡 *Tip:* Je kunt ook gewoon typen: "bel mam" of "sms Jan dat ik later kom"
         """
         await update.message.reply_text(
             welcome_message,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=self._get_main_menu_keyboard(),
+        )
+
+    async def menu_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler voor /menu command — toon het hoofdmenu"""
+        await update.message.reply_text(
+            "📋 *Hoofdmenu* — Kies een actie:",
+            parse_mode="Markdown",
+            reply_markup=self._get_main_menu_keyboard(),
         )
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -529,6 +612,609 @@ Typ gewoon wat je wilt!
                 "❌ Kon herinnering niet opslaan. Probeer later opnieuw."
             )
 
+    # ── Wizard management ─────────────────────────────────────────────
+
+    def _start_wizard(self, user_id: str, chat_id: int, wizard_type: WizardType) -> WizardState:
+        """Start een nieuwe wizard voor een gebruiker (vervangt eventueel bestaande)"""
+        first_step = WIZARD_FLOWS[wizard_type][0]
+        state = WizardState(
+            wizard_type=wizard_type,
+            current_step=first_step,
+            user_id=user_id,
+            chat_id=chat_id,
+            started_at=asyncio.get_event_loop().time(),
+        )
+        self._pending_wizards[user_id] = state
+        return state
+
+    def _get_wizard(self, user_id: str) -> Optional[WizardState]:
+        """Haal actieve wizard op; verwijder als timeout verstreken"""
+        wizard = self._pending_wizards.get(user_id)
+        if wizard:
+            elapsed = asyncio.get_event_loop().time() - wizard.started_at
+            if elapsed > WIZARD_TIMEOUT:
+                self._clear_wizard(user_id)
+                return None
+        return wizard
+
+    def _clear_wizard(self, user_id: str):
+        """Verwijder wizard state voor gebruiker"""
+        self._pending_wizards.pop(user_id, None)
+
+    def _advance_wizard(self, user_id: str) -> Optional[WizardStep]:
+        """Ga naar de volgende stap; return None als wizard klaar is"""
+        wizard = self._get_wizard(user_id)
+        if not wizard:
+            return None
+        flow = WIZARD_FLOWS[wizard.wizard_type]
+        try:
+            idx = flow.index(wizard.current_step)
+        except ValueError:
+            return None
+        if idx + 1 < len(flow):
+            wizard.current_step = flow[idx + 1]
+            return wizard.current_step
+        return None
+
+    # ── Wizard UI helpers ──────────────────────────────────────────────
+
+    async def _build_contact_keyboard(
+        self, user_id: str, wizard_type: WizardType, max_contacts: int = 6
+    ) -> InlineKeyboardMarkup:
+        """Bouw inline keyboard met contacten van de gebruiker"""
+        buttons: List[List[InlineKeyboardButton]] = []
+        wt = wizard_type.value
+
+        if self.memory:
+            try:
+                contacts = await self.memory.get_contacts(user_id)
+
+                # Filter: mail-wizard toont alleen contacten met email
+                if wizard_type == WizardType.MAIL:
+                    contacts = [c for c in contacts if c.get("email")]
+                else:
+                    contacts = [c for c in contacts if c.get("phone_number")]
+
+                for contact in contacts[:max_contacts]:
+                    name = contact.get("name", "?")[:15]
+                    cid = str(contact.get("id", ""))[:20]
+                    buttons.append([
+                        InlineKeyboardButton(
+                            f"👤 {name}",
+                            callback_data=f"wz:{wt}:ct:{cid}",
+                        )
+                    ])
+            except Exception:
+                pass
+
+        # Handmatig invoeren
+        if wizard_type == WizardType.MAIL:
+            manual_label = "📝 Ander e-mailadres…"
+        else:
+            manual_label = "📝 Ander nummer…"
+        buttons.append([InlineKeyboardButton(manual_label, callback_data=f"wz:{wt}:ct:manual")])
+        buttons.append([InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel")])
+        return InlineKeyboardMarkup(buttons)
+
+    def _build_confirm_keyboard(self, wizard_type: WizardType) -> InlineKeyboardMarkup:
+        """Bevestigings-knoppen voor de laatste stap"""
+        wt = wizard_type.value
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Ja, doen", callback_data=f"wz:{wt}:ok:yes"),
+                InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel"),
+            ]
+        ])
+
+    def _build_datetime_keyboard(self, wizard_type: WizardType) -> InlineKeyboardMarkup:
+        """Snelle datum/tijd opties voor agenda wizard"""
+        wt = wizard_type.value
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Morgen 09:00", callback_data=f"wz:{wt}:dt:m09"),
+                InlineKeyboardButton("Morgen 14:00", callback_data=f"wz:{wt}:dt:m14"),
+            ],
+            [
+                InlineKeyboardButton("Overmorgen 10:00", callback_data=f"wz:{wt}:dt:o10"),
+                InlineKeyboardButton("Overmorgen 15:00", callback_data=f"wz:{wt}:dt:o15"),
+            ],
+            [InlineKeyboardButton("📝 Andere tijd…", callback_data=f"wz:{wt}:dt:custom")],
+            [InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel")],
+        ])
+
+    async def _render_wizard_step(self, update_or_query, wizard: WizardState, *, edit: bool = False):
+        """Render de huidige wizard stap naar de gebruiker"""
+        step = wizard.current_step
+        wt = wizard.wizard_type
+
+        # Emoji per type
+        emoji_map = {
+            WizardType.BELLEN: "📞",
+            WizardType.SMS: "📱",
+            WizardType.MAIL: "📧",
+            WizardType.AGENDA: "📅",
+        }
+        em = emoji_map.get(wt, "🔧")
+
+        text = ""
+        markup = None
+
+        if step == WizardStep.SELECT_CONTACT:
+            if wt == WizardType.BELLEN:
+                text = f"{em} *Wie wil je bellen?*\nKies een contact of voer een nummer in:"
+            elif wt == WizardType.SMS:
+                text = f"{em} *Naar wie wil je een SMS sturen?*\nKies een contact of voer een nummer in:"
+            elif wt == WizardType.MAIL:
+                text = f"{em} *Naar wie wil je mailen?*\nKies een contact of voer een e-mailadres in:"
+            markup = await self._build_contact_keyboard(wizard.user_id, wt)
+
+        elif step == WizardStep.ENTER_NUMBER:
+            text = f"{em} Typ het telefoonnummer (bijv. +31612345678 of 0612345678):"
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel")]
+            ])
+
+        elif step == WizardStep.ENTER_EMAIL:
+            text = f"{em} Typ het e-mailadres:"
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel")]
+            ])
+
+        elif step == WizardStep.ENTER_MESSAGE:
+            contact = wizard.contact_name or wizard.phone_number or wizard.email_address or "?"
+            if wt == WizardType.BELLEN:
+                text = f"{em} Bellen naar *{contact}*\n\nWat wil je dat ik ga zeggen?"
+            elif wt == WizardType.SMS:
+                text = f"{em} SMS naar *{contact}*\n\nWat wil je sturen?"
+            elif wt == WizardType.MAIL:
+                text = f"{em} Mail naar *{contact}*\nOnderwerp: _{wizard.subject}_\n\nSchrijf je bericht:"
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel")]
+            ])
+
+        elif step == WizardStep.ENTER_SUBJECT:
+            contact = wizard.contact_name or wizard.email_address or "?"
+            text = f"{em} Mail naar *{contact}*\n\nWat is het onderwerp?"
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel")]
+            ])
+
+        elif step == WizardStep.ENTER_TITLE:
+            text = f"{em} *Nieuwe afspraak*\n\nWat voor afspraak wil je inplannen?"
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Annuleren", callback_data="wz:cancel")]
+            ])
+
+        elif step == WizardStep.ENTER_DATETIME:
+            text = (
+                f"{em} *{wizard.event_title}*\n\n"
+                "Wanneer is de afspraak?\n"
+                "Kies een optie of typ zelf (bijv. _morgen 10:00_ of _15-02 14:30_):"
+            )
+            markup = self._build_datetime_keyboard(wt)
+
+        elif step == WizardStep.CONFIRM:
+            text = self._build_confirm_summary(wizard)
+            markup = self._build_confirm_keyboard(wt)
+
+        # Verstuur of bewerk bericht
+        if edit and hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+        elif hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+        elif hasattr(update_or_query, 'reply_text'):
+            await update_or_query.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+
+    def _build_confirm_summary(self, wizard: WizardState) -> str:
+        """Bouw samenvatting voor bevestigingsstap"""
+        wt = wizard.wizard_type
+        contact = wizard.contact_name or wizard.phone_number or wizard.email_address or "?"
+
+        if wt == WizardType.BELLEN:
+            phone = wizard.phone_number or ""
+            return (
+                f"📞 *Klaar om te bellen*\n\n"
+                f"👤 Naar: *{contact}*"
+                + (f" ({phone})" if phone and phone != contact else "")
+                + f"\n💬 Boodschap: _{wizard.message_body}_\n\n"
+                "Wil je dat ik nu bel?"
+            )
+        elif wt == WizardType.SMS:
+            phone = wizard.phone_number or ""
+            return (
+                f"📱 *SMS klaar*\n\n"
+                f"👤 Naar: *{contact}*"
+                + (f" ({phone})" if phone and phone != contact else "")
+                + f"\n💬 Bericht: _{wizard.message_body}_\n\n"
+                "Versturen?"
+            )
+        elif wt == WizardType.MAIL:
+            email = wizard.email_address or ""
+            return (
+                f"📧 *Mail klaar*\n\n"
+                f"👤 Aan: *{contact}*"
+                + (f" ({email})" if email and email != contact else "")
+                + f"\n📝 Onderwerp: _{wizard.subject}_\n"
+                "─────────────\n"
+                f"{wizard.message_body}\n"
+                "─────────────\n\n"
+                "Versturen?"
+            )
+        elif wt == WizardType.AGENDA:
+            return (
+                f"📅 *Afspraak*\n\n"
+                f"📝 {wizard.event_title}\n"
+                f"📆 {wizard.event_datetime}\n\n"
+                "Toevoegen aan agenda?"
+            )
+        return "Bevestig je actie?"
+
+    # ── Wizard input processing ────────────────────────────────────────
+
+    async def _process_wizard_input(self, update: Update, wizard: WizardState, text: str):
+        """Verwerk tekst-input binnen een actieve wizard"""
+        step = wizard.current_step
+        user_id = wizard.user_id
+
+        if step == WizardStep.ENTER_NUMBER:
+            # Valideer en sla nummer op
+            cleaned = text.strip().replace(" ", "").replace("-", "")
+            if not cleaned.startswith("+") and not cleaned[0].isdigit():
+                await update.message.reply_text("⚠️ Dat lijkt geen geldig nummer. Probeer bijv. +31612345678 of 0612345678")
+                return
+            wizard.phone_number = cleaned
+            self._advance_wizard(user_id)
+            await self._render_wizard_step(update, wizard)
+
+        elif step == WizardStep.ENTER_EMAIL:
+            if "@" not in text or "." not in text:
+                await update.message.reply_text("⚠️ Dat lijkt geen geldig e-mailadres. Probeer opnieuw:")
+                return
+            wizard.email_address = text.strip()
+            self._advance_wizard(user_id)
+            await self._render_wizard_step(update, wizard)
+
+        elif step == WizardStep.ENTER_MESSAGE:
+            wizard.message_body = text.strip()
+            self._advance_wizard(user_id)
+            await self._render_wizard_step(update, wizard)
+
+        elif step == WizardStep.ENTER_SUBJECT:
+            wizard.subject = text.strip()
+            self._advance_wizard(user_id)
+            await self._render_wizard_step(update, wizard)
+
+        elif step == WizardStep.ENTER_TITLE:
+            wizard.event_title = text.strip()
+            self._advance_wizard(user_id)
+            await self._render_wizard_step(update, wizard)
+
+        elif step == WizardStep.ENTER_DATETIME:
+            wizard.event_datetime = text.strip()
+            self._advance_wizard(user_id)
+            await self._render_wizard_step(update, wizard)
+
+        elif step == WizardStep.SELECT_CONTACT:
+            # Gebruiker typte een naam i.p.v. button te klikken
+            await self._handle_wizard_contact_text(update, wizard, text)
+
+        else:
+            # Onbekende stap – stuur naar normaal
+            self._clear_wizard(user_id)
+            await update.message.reply_text("⚠️ Er ging iets mis. Probeer opnieuw via het menu.")
+
+    async def _handle_wizard_contact_text(self, update: Update, wizard: WizardState, text: str):
+        """Verwerk getypte contactnaam of nummer in SELECT_CONTACT stap"""
+        user_id = wizard.user_id
+        cleaned = text.strip()
+
+        # Check of het een telefoonnummer is
+        if cleaned.startswith("+") or (cleaned and cleaned[0].isdigit()):
+            if wizard.wizard_type == WizardType.MAIL:
+                # Bij mail verwachten we een email
+                if "@" in cleaned:
+                    wizard.email_address = cleaned
+                    wizard.contact_name = cleaned
+                    self._advance_wizard(user_id)
+                    await self._render_wizard_step(update, wizard)
+                    return
+                else:
+                    await update.message.reply_text("⚠️ Voer een e-mailadres in (bijv. jan@email.nl):")
+                    return
+            else:
+                wizard.phone_number = cleaned
+                wizard.contact_name = cleaned
+                self._advance_wizard(user_id)
+                await self._render_wizard_step(update, wizard)
+                return
+
+        # Check email
+        if "@" in cleaned and wizard.wizard_type == WizardType.MAIL:
+            wizard.email_address = cleaned
+            wizard.contact_name = cleaned
+            self._advance_wizard(user_id)
+            await self._render_wizard_step(update, wizard)
+            return
+
+        # Probeer contact te zoeken op naam
+        if self.memory:
+            try:
+                contact = await self.memory.get_contact_by_name(user_id, cleaned)
+                if contact:
+                    wizard.contact_name = contact.get("name", cleaned)
+                    wizard.phone_number = contact.get("phone_number")
+                    wizard.email_address = contact.get("email")
+
+                    # Check of we het juiste veld hebben
+                    if wizard.wizard_type == WizardType.MAIL and not wizard.email_address:
+                        await update.message.reply_text(
+                            f"⚠️ Contact *{wizard.contact_name}* heeft geen e-mailadres. "
+                            "Voer een e-mailadres in of kies een ander contact:",
+                            parse_mode="Markdown",
+                        )
+                        return
+                    if wizard.wizard_type != WizardType.MAIL and not wizard.phone_number:
+                        await update.message.reply_text(
+                            f"⚠️ Contact *{wizard.contact_name}* heeft geen telefoonnummer. "
+                            "Voer een nummer in of kies een ander contact:",
+                            parse_mode="Markdown",
+                        )
+                        return
+
+                    self._advance_wizard(user_id)
+                    await self._render_wizard_step(update, wizard)
+                    return
+            except Exception:
+                pass
+
+        # Niet gevonden
+        await update.message.reply_text(
+            f"🔍 Contact '{cleaned}' niet gevonden.\n"
+            "Voer een telefoonnummer of e-mailadres in, of kies uit de knoppen hierboven."
+        )
+
+    # ── Wizard callback handler ────────────────────────────────────────
+
+    async def handle_wizard_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler voor wizard inline button callbacks"""
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        await query.answer()
+
+        user_id = str(update.effective_user.id)
+        data = query.data  # bijv. "wz:bellen:ct:abc123"
+
+        # Universeel annuleren
+        if data == "wz:cancel":
+            self._clear_wizard(user_id)
+            await query.edit_message_text("❌ Geannuleerd. Kies een actie uit het menu of typ wat je wilt.")
+            return
+
+        parts = data.split(":", 3)
+        if len(parts) < 4:
+            return
+
+        _, wz_type, step_code, payload = parts
+
+        wizard = self._get_wizard(user_id)
+        if not wizard:
+            await query.edit_message_text("⚠️ Deze wizard is verlopen. Start opnieuw via het menu.")
+            return
+
+        if wizard.wizard_type.value != wz_type:
+            await query.edit_message_text("⚠️ Wizard mismatch. Start opnieuw.")
+            self._clear_wizard(user_id)
+            return
+
+        # Contact geselecteerd
+        if step_code == "ct":
+            if payload == "manual":
+                # Handmatige invoer
+                if wizard.wizard_type == WizardType.MAIL:
+                    wizard.current_step = WizardStep.ENTER_EMAIL
+                else:
+                    wizard.current_step = WizardStep.ENTER_NUMBER
+                await self._render_wizard_step(query, wizard, edit=True)
+            else:
+                # Contact ID opgezocht
+                await self._handle_contact_selected(query, wizard, payload)
+
+        # Datum/tijd snelkeuze (agenda)
+        elif step_code == "dt":
+            await self._handle_datetime_selected(query, wizard, payload)
+
+        # Bevestiging
+        elif step_code == "ok":
+            if payload == "yes":
+                await self._execute_wizard(query, wizard)
+            else:
+                self._clear_wizard(user_id)
+                await query.edit_message_text("❌ Geannuleerd.")
+
+    async def _handle_contact_selected(self, query, wizard: WizardState, contact_id: str):
+        """Verwerk geselecteerd contact uit inline button"""
+        if not self.memory:
+            await query.edit_message_text("❌ Contacten niet beschikbaar.")
+            self._clear_wizard(wizard.user_id)
+            return
+
+        try:
+            contacts = await self.memory.get_contacts(wizard.user_id)
+            contact = None
+            for c in contacts:
+                if str(c.get("id", ""))[:20] == contact_id:
+                    contact = c
+                    break
+
+            if not contact:
+                await query.edit_message_text("⚠️ Contact niet gevonden. Start opnieuw.")
+                self._clear_wizard(wizard.user_id)
+                return
+
+            wizard.contact_name = contact.get("name")
+            wizard.phone_number = contact.get("phone_number")
+            wizard.email_address = contact.get("email")
+
+            # Valideer dat we het juiste veld hebben
+            if wizard.wizard_type == WizardType.MAIL and not wizard.email_address:
+                await query.edit_message_text(
+                    f"⚠️ *{wizard.contact_name}* heeft geen e-mailadres opgeslagen.\n"
+                    "Typ een e-mailadres of kies een ander contact.",
+                    parse_mode="Markdown",
+                )
+                wizard.current_step = WizardStep.ENTER_EMAIL
+                return
+
+            if wizard.wizard_type != WizardType.MAIL and not wizard.phone_number:
+                await query.edit_message_text(
+                    f"⚠️ *{wizard.contact_name}* heeft geen telefoonnummer opgeslagen.\n"
+                    "Typ een nummer of kies een ander contact.",
+                    parse_mode="Markdown",
+                )
+                wizard.current_step = WizardStep.ENTER_NUMBER
+                return
+
+            self._advance_wizard(wizard.user_id)
+            await self._render_wizard_step(query, wizard, edit=True)
+
+        except Exception as e:
+            logger.error(f"Error bij contact selectie: {e}")
+            await query.edit_message_text("❌ Fout bij ophalen contact.")
+            self._clear_wizard(wizard.user_id)
+
+    async def _handle_datetime_selected(self, query, wizard: WizardState, code: str):
+        """Verwerk datum/tijd snelkeuze voor agenda wizard"""
+        from datetime import datetime, timedelta
+        import pytz
+
+        nl_tz = pytz.timezone("Europe/Amsterdam")
+        now = datetime.now(nl_tz)
+
+        dt_map = {
+            "m09": (now + timedelta(days=1), 9, 0),
+            "m14": (now + timedelta(days=1), 14, 0),
+            "o10": (now + timedelta(days=2), 10, 0),
+            "o15": (now + timedelta(days=2), 15, 0),
+        }
+
+        if code == "custom":
+            wizard.current_step = WizardStep.ENTER_DATETIME
+            # Verwijder knoppen, vraag om tekst input
+            await query.edit_message_text(
+                f"📅 *{wizard.event_title}*\n\n"
+                "Typ de datum en tijd (bijv. _morgen 10:00_ of _15-02 14:30_):",
+                parse_mode="Markdown",
+            )
+            return
+
+        if code in dt_map:
+            base, hour, minute = dt_map[code]
+            target = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            wizard.event_datetime = target.strftime("%d-%m-%Y om %H:%M")
+            self._advance_wizard(wizard.user_id)
+            await self._render_wizard_step(query, wizard, edit=True)
+        else:
+            await query.edit_message_text("⚠️ Ongeldige keuze. Probeer opnieuw.")
+
+    # ── Wizard executie ────────────────────────────────────────────────
+
+    async def _execute_wizard(self, query, wizard: WizardState):
+        """Bouw taak-string en voer uit via de orchestrator"""
+        user_id = wizard.user_id
+        chat_id = wizard.chat_id
+        wt = wizard.wizard_type
+
+        # Bouw natuurlijke taak-string
+        if wt == WizardType.BELLEN:
+            contact = wizard.contact_name or wizard.phone_number
+            task = f"Bel {contact}"
+            if wizard.message_body:
+                task += f" en zeg: {wizard.message_body}"
+
+        elif wt == WizardType.SMS:
+            contact = wizard.contact_name or wizard.phone_number
+            task = f"Stuur SMS naar {contact} dat {wizard.message_body}"
+
+        elif wt == WizardType.MAIL:
+            contact = wizard.contact_name or wizard.email_address
+            task = f"Mail {contact} met onderwerp '{wizard.subject}': {wizard.message_body}"
+
+        elif wt == WizardType.AGENDA:
+            task = f"Zet {wizard.event_title} in mijn agenda op {wizard.event_datetime}"
+
+        else:
+            task = "onbekende actie"
+
+        # Clear wizard vóór executie
+        self._clear_wizard(user_id)
+
+        await query.edit_message_text("⏳ Bezig…")
+
+        try:
+            result = await process_request(
+                user_message=task,
+                user_id=user_id,
+                confirmed=True,
+            )
+
+            response = result.get("response", "Er ging iets mis.")
+            await query.edit_message_text(response)
+
+            # Start call polling als het een bel-actie was
+            call_id = result.get("call_id")
+            if call_id and call_id != "onbekend":
+                self._pending_calls[call_id] = {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "started_at": asyncio.get_event_loop().time(),
+                }
+                asyncio.create_task(
+                    self.poll_call_transcript(call_id, chat_id, user_id)
+                )
+
+            # Log in memory
+            if self.memory:
+                try:
+                    conv = await self.memory.get_active_conversation(user_id)
+                    if not conv:
+                        conv = await self.memory.start_conversation(user_id)
+                    await self.memory.add_message(
+                        conversation_id=conv["id"],
+                        role="user",
+                        content=f"[Wizard: {wt.value}] {task}",
+                    )
+                    await self.memory.add_message(
+                        conversation_id=conv["id"],
+                        role="assistant",
+                        content=response,
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error(f"Wizard executie fout: {e}")
+            await query.edit_message_text(f"❌ Er ging iets mis: {str(e)}")
+
+    @staticmethod
+    def _looks_like_full_command(text: str) -> bool:
+        """Detecteer of tekst een volledig commando is dat de wizard moet bypassen"""
+        lower = text.lower().strip()
+        patterns = [
+            r'^bel\s+\w+',
+            r'^sms\s+\w+',
+            r'^mail\s+\w+',
+            r'^stuur\s+(sms|mail|email)',
+            r'^zet\s+.+\s+in\s+(mijn\s+)?agenda',
+        ]
+        for pattern in patterns:
+            if _re_module.match(pattern, lower):
+                return True
+        return False
+
+    # ── Bestaande confirmation helpers ─────────────────────────────────
+
     def _store_confirmation(self, user_id: str, chat_id: str, message: str) -> str:
         token = uuid4().hex
         self._pending_confirmations[token] = {
@@ -748,6 +1434,51 @@ Typ gewoon wat je wilt!
         chat_id = update.effective_chat.id
 
         lower = message_text.strip().lower()
+
+        # ── Menu button detectie ────────────────────────────────────
+        menu_mapping = {
+            "📞 bellen": WizardType.BELLEN,
+            "📱 sms": WizardType.SMS,
+            "📧 mail": WizardType.MAIL,
+            "📅 agenda": WizardType.AGENDA,
+        }
+
+        if lower in menu_mapping:
+            self._clear_wizard(user_id)
+            self._clear_confirmation(self._find_pending_confirmation(user_id)[0])
+            wizard = self._start_wizard(user_id, chat_id, menu_mapping[lower])
+            await self._render_wizard_step(update, wizard)
+            return
+
+        if lower == "📇 contacten":
+            await self.contact_command(update, context)
+            return
+
+        if lower == "❓ help":
+            await self.help_command(update, context)
+            return
+
+        # ── Actieve wizard check ────────────────────────────────────
+        wizard = self._get_wizard(user_id)
+        if wizard:
+            cancel_words = {"annuleer", "stop", "cancel", "terug"}
+            if lower in cancel_words:
+                self._clear_wizard(user_id)
+                await update.message.reply_text(
+                    "❌ Geannuleerd. Kies een actie uit het menu of typ wat je wilt.",
+                    reply_markup=self._get_main_menu_keyboard(),
+                )
+                return
+
+            # Escape hatch: volledig commando bypass wizard
+            if self._looks_like_full_command(message_text):
+                self._clear_wizard(user_id)
+                # Val door naar normale verwerking hieronder
+            else:
+                await self._process_wizard_input(update, wizard, message_text)
+                return
+
+        # ── Bestaande confirmation flow ─────────────────────────────
         yes_words = {"ja", "yes", "oke", "ok", "doe maar", "ga door", "bevestig"}
         no_words = {"nee", "no", "stop", "annuleer", "cancel"}
         token, pending = self._find_pending_confirmation(user_id)
@@ -1071,6 +1802,10 @@ Typ gewoon wat je wilt!
         self.application.add_handler(CommandHandler("contact", self.contact_command))
         self.application.add_handler(CommandHandler("voorkeuren", self.preferences_command))
         self.application.add_handler(CommandHandler("herinner", self.reminder_command))
+        self.application.add_handler(CommandHandler("menu", self.menu_command))
+
+        # Wizard callbacks (vóór confirmation — meer specifiek patroon)
+        self.application.add_handler(CallbackQueryHandler(self.handle_wizard_callback, pattern=r"^wz:"))
 
         # Confirmation buttons
         self.application.add_handler(CallbackQueryHandler(self.handle_confirmation_callback, pattern=r"^confirm:"))
