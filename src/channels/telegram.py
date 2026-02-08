@@ -34,6 +34,9 @@ from ..orchestrator.graph import process_request
 from ..memory.supabase import get_memory_system
 from ..agents.voice import VoiceAgent, _ended_reason_to_message
 from ..scheduler.reminders import get_reminder_scheduler
+from ..tools.google_calendar import list_events, get_free_slots
+from ..tools.sms import send_sms
+from ..tools.gmail import send_email
 
 
 # ── Wizard data structuren ──────────────────────────────────────────
@@ -151,7 +154,8 @@ class TelegramBot:
         """Persistent menu keyboard onderaan het scherm"""
         keyboard = [
             [KeyboardButton("📞 Bellen"), KeyboardButton("📱 SMS"), KeyboardButton("📧 Mail")],
-            [KeyboardButton("📅 Agenda"), KeyboardButton("📇 Contacten"), KeyboardButton("❓ Help")],
+            [KeyboardButton("📅 Agenda"), KeyboardButton("🕐 Vrije Tijd"), KeyboardButton("📊 Overzicht")],
+            [KeyboardButton("📇 Contacten"), KeyboardButton("❓ Help")],
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -166,6 +170,8 @@ Ik ben je persoonlijke AI assistent. Kies een actie uit het menu hieronder, of t
 📱 *SMS* — Stuur een berichtje
 📧 *Mail* — Verstuur een e-mail
 📅 *Agenda* — Plan een afspraak
+🕐 *Vrije Tijd* — Check wanneer je vrij bent
+📊 *Overzicht* — Weekoverzicht van alles
 📇 *Contacten* — Beheer je contacten
 
 💡 *Tip:* Je kunt ook gewoon typen: "bel mam" of "sms Jan dat ik later kom"
@@ -206,12 +212,18 @@ Ik ben je persoonlijke AI assistent. Kies een actie uit het menu hieronder, of t
 /contact - Beheer contacten
 /herinner - Stel herinneringen in
 /voorkeuren - Bekijk wat ik heb geleerd
+/overzicht - Weekoverzicht (calls, sms, mails)
+/vrijetijd - Vrije tijdsloten in je agenda
+
+*Groeps-SMS/mail:*
+• "sms iedereen uit persoonlijk dat het feest morgen is"
+• "mail iedereen uit bedrijf de nieuwe prijslijst"
 
 *Tips:*
 • Sla contacten op: `/contact add Jan +31612345678 persoonlijk`
 • Typ dan "bel Jan", "sms Jan" of "mail Jan"
+• Na elk gesprek krijg je suggesties (contact opslaan, herinnering, SMS)
 • Ik leer je voorkeuren automatisch
-• Je krijgt transcripts na elk telefoongesprek
 
 Typ gewoon wat je wilt!
         """
@@ -610,6 +622,189 @@ Typ gewoon wat je wilt!
             logger.error(f"Error adding reminder: {e}")
             await update.message.reply_text(
                 "❌ Kon herinnering niet opslaan. Probeer later opnieuw."
+            )
+
+    async def overzicht_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handler voor /overzicht command — weekoverzicht dashboard.
+        Toont alle calls, SMS, mails en herinneringen van de afgelopen 7 dagen.
+        """
+        user_id = str(update.effective_user.id)
+
+        if not self.memory:
+            await update.message.reply_text(
+                "❌ Overzicht niet beschikbaar (geheugen niet geconfigureerd)."
+            )
+            return
+
+        await update.message.chat.send_action("typing")
+
+        try:
+            activity = await self.memory.get_weekly_activity(user_id)
+
+            calls = activity.get("calls", [])
+            sms_msgs = activity.get("sms_messages", [])
+            emails = activity.get("emails", [])
+            reminders = activity.get("reminders", [])
+
+            total = len(calls) + len(sms_msgs) + len(emails)
+
+            message = "📊 *Weekoverzicht* (afgelopen 7 dagen)\n"
+            message += "━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+            # Calls
+            message += f"📞 *Gesprekken:* {len(calls)}\n"
+            for c in calls[:5]:
+                phone = c.get("phone_number", "?")
+                status = c.get("status", "?")
+                duration = c.get("duration_seconds")
+                dur_str = f" ({duration}s)" if duration else ""
+                status_emoji = "✅" if status == "ended" else "❌"
+                summary_snippet = ""
+                if c.get("summary"):
+                    summary_snippet = f"\n   └ _{c['summary'][:60]}…_"
+                message += f"  {status_emoji} {phone}{dur_str}{summary_snippet}\n"
+            if len(calls) > 5:
+                message += f"  _…en {len(calls) - 5} meer_\n"
+            message += "\n"
+
+            # SMS
+            message += f"📱 *SMS berichten:* {len(sms_msgs)}\n"
+            for s in sms_msgs[:3]:
+                content = s.get("content", "")[:60]
+                message += f"  • {content}…\n"
+            if len(sms_msgs) > 3:
+                message += f"  _…en {len(sms_msgs) - 3} meer_\n"
+            message += "\n"
+
+            # Emails
+            message += f"📧 *E-mails:* {len(emails)}\n"
+            for e in emails[:3]:
+                content = e.get("content", "")[:60]
+                message += f"  • {content}…\n"
+            if len(emails) > 3:
+                message += f"  _…en {len(emails) - 3} meer_\n"
+            message += "\n"
+
+            # Reminders
+            active_reminders = [r for r in reminders if not r.get("is_sent")]
+            sent_reminders = [r for r in reminders if r.get("is_sent")]
+            message += f"⏰ *Herinneringen:* {len(sent_reminders)} afgelopen, {len(active_reminders)} actief\n"
+            for r in active_reminders[:3]:
+                msg = r.get("message", "?")[:40]
+                message += f"  • {msg}\n"
+            message += "\n"
+
+            # Agenda vandaag + morgen
+            try:
+                from datetime import datetime, timedelta
+                import pytz
+                nl_tz = pytz.timezone("Europe/Amsterdam")
+                now = datetime.now(nl_tz)
+                tomorrow_end = (now + timedelta(days=2)).replace(hour=0, minute=0, second=0)
+
+                events = list_events(
+                    time_min=now.isoformat(),
+                    time_max=tomorrow_end.isoformat(),
+                )
+                if events:
+                    message += f"📅 *Komende afspraken:* {len(events)}\n"
+                    for ev in events[:5]:
+                        summary = ev.get("summary", "Geen titel")
+                        start = ev.get("start", {}).get("dateTime", ev.get("start", {}).get("date", ""))
+                        if "T" in start:
+                            try:
+                                dt = datetime.fromisoformat(start)
+                                time_str = dt.strftime("%d-%m %H:%M")
+                            except ValueError:
+                                time_str = start
+                        else:
+                            time_str = start
+                        message += f"  • {time_str} — {summary}\n"
+                    message += "\n"
+            except Exception:
+                pass
+
+            message += "━━━━━━━━━━━━━━━━━━━━━\n"
+            message += f"📈 *Totaal acties:* {total}"
+
+            await update.message.reply_text(message, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"Error bij weekoverzicht: {e}")
+            await update.message.reply_text(
+                "❌ Kon weekoverzicht niet ophalen. Probeer later opnieuw."
+            )
+
+    async def vrije_tijd_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handler voor /vrijetijd command en '🕐 Vrije Tijd' menu button.
+        Toont vrije tijdsloten voor vandaag en morgen.
+        """
+        from datetime import datetime, timedelta
+        import pytz
+
+        await update.message.chat.send_action("typing")
+
+        nl_tz = pytz.timezone("Europe/Amsterdam")
+        now = datetime.now(nl_tz)
+        today_str = now.strftime("%Y-%m-%d")
+        tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+        overmorgen_str = (now + timedelta(days=2)).strftime("%Y-%m-%d")
+
+        message = "🕐 *Vrije tijdsloten*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        days_to_check = [
+            ("Vandaag", today_str, now.strftime("%A %d-%m")),
+            ("Morgen", tomorrow_str, (now + timedelta(days=1)).strftime("%A %d-%m")),
+            ("Overmorgen", overmorgen_str, (now + timedelta(days=2)).strftime("%A %d-%m")),
+        ]
+
+        # Nederlandse dagnamen
+        dag_map = {
+            "Monday": "Maandag", "Tuesday": "Dinsdag", "Wednesday": "Woensdag",
+            "Thursday": "Donderdag", "Friday": "Vrijdag", "Saturday": "Zaterdag",
+            "Sunday": "Zondag",
+        }
+
+        try:
+            for label, date_str, day_display in days_to_check:
+                # Vertaal dagnaam
+                for eng, nl in dag_map.items():
+                    day_display = day_display.replace(eng, nl)
+
+                try:
+                    slots = get_free_slots(date_str)
+                    message += f"📅 *{label}* ({day_display})\n"
+
+                    if not slots:
+                        message += "  ⚠️ Geen vrije slots gevonden\n"
+                    else:
+                        for slot in slots:
+                            start = slot["start"]
+                            end = slot["end"]
+                            # Bereken duur
+                            s_h, s_m = map(int, start.split(":"))
+                            e_h, e_m = map(int, end.split(":"))
+                            dur_min = (e_h * 60 + e_m) - (s_h * 60 + s_m)
+                            if dur_min >= 60:
+                                dur_str = f"{dur_min // 60}u{dur_min % 60:02d}" if dur_min % 60 else f"{dur_min // 60}u"
+                            else:
+                                dur_str = f"{dur_min}min"
+                            message += f"  🟢 {start} – {end} ({dur_str})\n"
+                    message += "\n"
+                except Exception as e:
+                    message += f"📅 *{label}*: ❌ Kon niet ophalen\n\n"
+
+            message += "💡 _Typ \"📅 Agenda\" om een afspraak in te plannen_"
+
+            await update.message.reply_text(message, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"Error bij vrije tijd check: {e}")
+            await update.message.reply_text(
+                "❌ Kon agenda niet checken. Is Google Calendar gekoppeld?\n"
+                "Check /status voor de configuratie."
             )
 
     # ── Wizard management ─────────────────────────────────────────────
@@ -1213,6 +1408,146 @@ Typ gewoon wat je wilt!
                 return True
         return False
 
+    # ── Groeps-SMS/mail ──────────────────────────────────────────────
+
+    async def _handle_group_message(
+        self, update: Update, user_id: str,
+        category: str, body: str, is_sms: bool = True
+    ):
+        """
+        Verstuur een SMS of mail naar alle contacten in een categorie.
+        Toont eerst een overzicht en vraagt om bevestiging.
+        """
+        if not self.memory:
+            await update.message.reply_text("❌ Contacten niet beschikbaar.")
+            return
+
+        try:
+            contacts = await self.memory.get_contacts(user_id, category=category)
+        except Exception:
+            contacts = []
+
+        if not contacts:
+            await update.message.reply_text(
+                f"📇 Geen contacten gevonden in categorie *{category}*.\n"
+                "Voeg contacten toe met `/contact add Naam +31612345678 categorie`",
+                parse_mode="Markdown",
+            )
+            return
+
+        msg_type = "SMS" if is_sms else "Mail"
+        field = "phone_number" if is_sms else "email"
+        valid_contacts = [c for c in contacts if c.get(field)]
+
+        if not valid_contacts:
+            missing = "telefoonnummer" if is_sms else "e-mailadres"
+            await update.message.reply_text(
+                f"⚠️ Geen contacten in *{category}* met een {missing}.",
+                parse_mode="Markdown",
+            )
+            return
+
+        # Toon overzicht
+        names = ", ".join(c.get("name", "?") for c in valid_contacts[:10])
+        if len(valid_contacts) > 10:
+            names += f" en {len(valid_contacts) - 10} meer"
+
+        # Sla op voor bevestiging
+        token = uuid4().hex
+        self._pending_confirmations[token] = {
+            "user_id": user_id,
+            "chat_id": str(update.effective_chat.id),
+            "message": f"__group_{'sms' if is_sms else 'mail'}__",
+            "group_data": {
+                "contacts": valid_contacts,
+                "body": body,
+                "category": category,
+                "is_sms": is_sms,
+            },
+        }
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Ja, verstuur", callback_data=f"confirm:yes:{token}"),
+                InlineKeyboardButton("❌ Annuleren", callback_data=f"confirm:no:{token}"),
+            ]
+        ])
+
+        await update.message.reply_text(
+            f"📢 *Groeps-{msg_type}*\n\n"
+            f"Categorie: *{category}*\n"
+            f"Ontvangers ({len(valid_contacts)}): {names}\n\n"
+            f"Bericht: _{body}_\n\n"
+            f"Wil je deze {msg_type} naar {len(valid_contacts)} contacten versturen?",
+            parse_mode="Markdown",
+            reply_markup=keyboard,
+        )
+
+    async def _execute_group_message(self, user_id: str, chat_id: str, group_data: Dict[str, Any]):
+        """Voer de daadwerkelijke groeps-SMS/mail uit"""
+        contacts = group_data["contacts"]
+        body = group_data["body"]
+        is_sms = group_data["is_sms"]
+
+        sent = 0
+        failed = 0
+        errors = []
+
+        if self.application and self.application.bot:
+            await self.application.bot.send_message(
+                chat_id=int(chat_id),
+                text=f"⏳ Bezig met versturen naar {len(contacts)} contacten…"
+            )
+
+        for contact in contacts:
+            try:
+                if is_sms:
+                    from ..agents.voice import normalize_e164
+                    phone = normalize_e164(contact.get("phone_number", ""))
+                    if not phone:
+                        failed += 1
+                        errors.append(f"{contact.get('name')}: ongeldig nummer")
+                        continue
+                    result = await send_sms(to_number=phone, body=body)
+                    if result.get("success"):
+                        sent += 1
+                    else:
+                        failed += 1
+                        errors.append(f"{contact.get('name')}: {result.get('error', '?')[:50]}")
+                else:
+                    email = contact.get("email")
+                    if not email:
+                        failed += 1
+                        errors.append(f"{contact.get('name')}: geen email")
+                        continue
+                    import asyncio as _asyncio
+                    await _asyncio.to_thread(
+                        send_email,
+                        to_email=email,
+                        subject=f"Bericht van Connect Smart",
+                        body_text=body,
+                    )
+                    sent += 1
+            except Exception as e:
+                failed += 1
+                errors.append(f"{contact.get('name')}: {str(e)[:50]}")
+
+        # Stuur resultaat
+        msg_type = "SMS" if is_sms else "Mail"
+        message = f"📢 *Groeps-{msg_type} klaar*\n\n"
+        message += f"✅ Verstuurd: {sent}\n"
+        if failed:
+            message += f"❌ Mislukt: {failed}\n"
+            for err in errors[:5]:
+                message += f"  • {err}\n"
+
+        if self.application and self.application.bot:
+            await self.application.bot.send_message(
+                chat_id=int(chat_id),
+                text=message,
+                parse_mode="Markdown",
+            )
+
     # ── Bestaande confirmation helpers ─────────────────────────────────
 
     def _store_confirmation(self, user_id: str, chat_id: str, message: str) -> str:
@@ -1354,7 +1689,17 @@ Typ gewoon wat je wilt!
                             )
                         except Exception as e:
                             logger.warning(f"⚠️ Kon call status niet bijwerken: {e}")
-                    
+
+                    # ── Proactieve suggesties na gesprek ──
+                    if status == "ended" and duration and int(duration) > 5:
+                        try:
+                            await self._send_post_call_suggestions(
+                                chat_id, user_id, call_id,
+                                transcript or "", summary or "",
+                            )
+                        except Exception as e:
+                            logger.warning(f"⚠️ Kon suggesties niet sturen: {e}")
+
                     # Verwijder uit pending calls
                     self._pending_calls.pop(call_id, None)
                     return
@@ -1371,6 +1716,121 @@ Typ gewoon wat je wilt!
             )
         self._pending_calls.pop(call_id, None)
     
+    async def _send_post_call_suggestions(
+        self, chat_id: int, user_id: str, call_id: str,
+        transcript: str, summary: str
+    ):
+        """
+        Stuur proactieve suggesties na een telefoongesprek.
+        Biedt knoppen voor: contact opslaan, herinnering, SMS samenvatting sturen.
+        """
+        if not self.application or not self.application.bot:
+            return
+
+        # Korte samenvatting voor weergave
+        short_summary = (summary or transcript)[:100].strip()
+        if not short_summary:
+            return
+
+        cid = call_id[:16]  # max 64 bytes voor callback_data
+        buttons: List[List[InlineKeyboardButton]] = []
+
+        # Contact opslaan suggestie
+        buttons.append([
+            InlineKeyboardButton(
+                "📇 Contact opslaan",
+                callback_data=f"ps:save:{cid}",
+            )
+        ])
+
+        # Herinnering instellen
+        buttons.append([
+            InlineKeyboardButton(
+                "⏰ Herinnering zetten",
+                callback_data=f"ps:remind:{cid}",
+            )
+        ])
+
+        # SMS samenvatting sturen
+        buttons.append([
+            InlineKeyboardButton(
+                "📱 SMS samenvatting sturen",
+                callback_data=f"ps:sms:{cid}",
+            )
+        ])
+
+        # Sla call info op voor callbacks
+        self._post_call_data = getattr(self, "_post_call_data", {})
+        self._post_call_data[cid] = {
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "call_id": call_id,
+            "transcript": transcript,
+            "summary": summary,
+        }
+
+        await self.application.bot.send_message(
+            chat_id=chat_id,
+            text=f"💡 *Wat wil je nu doen?*\n_{short_summary}_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def handle_post_call_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler voor proactieve suggestie knoppen na een telefoongesprek"""
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        await query.answer()
+
+        user_id = str(update.effective_user.id)
+        data = query.data  # "ps:save:abc123", "ps:remind:abc123", "ps:sms:abc123"
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            return
+
+        _, action, cid = parts
+
+        post_data = getattr(self, "_post_call_data", {}).get(cid)
+        if not post_data or post_data.get("user_id") != user_id:
+            await query.edit_message_text("⚠️ Deze suggestie is verlopen.")
+            return
+
+        chat_id = post_data["chat_id"]
+        call_id = post_data["call_id"]
+        transcript = post_data.get("transcript", "")
+        summary = post_data.get("summary", "")
+
+        if action == "save":
+            # Vraag om contactgegevens
+            await query.edit_message_text(
+                "📇 *Contact opslaan*\n\n"
+                "Typ de gegevens in dit formaat:\n"
+                "`/contact add Naam +31612345678 categorie`\n\n"
+                "Categorieën: restaurant, bedrijf, persoonlijk, overig",
+                parse_mode="Markdown",
+            )
+
+        elif action == "remind":
+            # Vraag om herinnering details
+            await query.edit_message_text(
+                "⏰ *Herinnering instellen*\n\n"
+                "Typ je herinnering, bijvoorbeeld:\n"
+                "`/herinner morgen 10:00 Nabellen over gesprek`\n"
+                "`/herinner over 30 minuten Follow-up doen`",
+                parse_mode="Markdown",
+            )
+
+        elif action == "sms":
+            # Start SMS wizard met samenvatting als bericht
+            short = (summary or transcript[:200]).strip()
+            self._clear_wizard(user_id)
+            wizard = self._start_wizard(user_id, chat_id, WizardType.SMS)
+            wizard.message_body = f"Samenvatting gesprek: {short}"
+            await query.edit_message_text("📱 *SMS met samenvatting*\nKies de ontvanger:")
+            await self._render_wizard_step(query, wizard)
+
     async def handle_confirmation_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler voor inline bevestigingsknoppen"""
         query = update.callback_query
@@ -1405,8 +1865,19 @@ Typ gewoon wat je wilt!
             return
 
         if action == "yes":
+            # Check of het een groepsbericht is
+            pending_msg = pending.get("message", "")
+            group_data = pending.get("group_data")
+            if pending_msg.startswith("__group_") and group_data:
+                await query.edit_message_text("⏳ Groepsbericht wordt verstuurd…")
+                chat_id = pending.get("chat_id") or str(query.message.chat_id if query.message else "")
+                asyncio.create_task(
+                    self._execute_group_message(user_id, chat_id, group_data)
+                )
+                return
+
             result = await process_request(
-                user_message=pending.get("message", ""),
+                user_message=pending_msg,
                 user_id=user_id,
                 confirmed=True
             )
@@ -1456,6 +1927,31 @@ Typ gewoon wat je wilt!
 
         if lower == "❓ help":
             await self.help_command(update, context)
+            return
+
+        if lower == "🕐 vrije tijd":
+            await self.vrije_tijd_command(update, context)
+            return
+
+        if lower == "📊 overzicht":
+            await self.overzicht_command(update, context)
+            return
+
+        # ── Groeps-SMS/mail detectie ─────────────────────────────
+        group_sms_match = _re_module.match(
+            r'^(?:sms|stuur\s+sms)\s+(?:iedereen|allemaal|groep)\s+(?:uit|van|in)\s+(\w+)\s+(?:dat\s+)?(.+)',
+            lower,
+        )
+        group_mail_match = _re_module.match(
+            r'^(?:mail|stuur\s+mail)\s+(?:iedereen|allemaal|groep)\s+(?:uit|van|in)\s+(\w+)\s+(?:dat\s+)?(.+)',
+            lower,
+        )
+        if group_sms_match or group_mail_match:
+            match = group_sms_match or group_mail_match
+            is_sms = group_sms_match is not None
+            category = match.group(1)
+            body = match.group(2).strip()
+            await self._handle_group_message(update, user_id, category, body, is_sms=is_sms)
             return
 
         # ── Actieve wizard check ────────────────────────────────────
@@ -1803,6 +2299,11 @@ Typ gewoon wat je wilt!
         self.application.add_handler(CommandHandler("voorkeuren", self.preferences_command))
         self.application.add_handler(CommandHandler("herinner", self.reminder_command))
         self.application.add_handler(CommandHandler("menu", self.menu_command))
+        self.application.add_handler(CommandHandler("overzicht", self.overzicht_command))
+        self.application.add_handler(CommandHandler("vrijetijd", self.vrije_tijd_command))
+
+        # Post-call suggestie callbacks
+        self.application.add_handler(CallbackQueryHandler(self.handle_post_call_callback, pattern=r"^ps:"))
 
         # Wizard callbacks (vóór confirmation — meer specifiek patroon)
         self.application.add_handler(CallbackQueryHandler(self.handle_wizard_callback, pattern=r"^wz:"))

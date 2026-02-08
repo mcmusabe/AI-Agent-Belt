@@ -69,3 +69,128 @@ def create_calendar_event(
 
     calendar_id = settings.google_calendar_id or "primary"
     return service.events().insert(calendarId=calendar_id, body=event).execute()
+
+
+def list_events(
+    time_min: str,
+    time_max: str,
+    timezone: str = "Europe/Amsterdam",
+    max_results: int = 50,
+) -> List[Dict[str, Any]]:
+    """
+    Haal agenda-events op binnen een tijdsperiode.
+
+    Args:
+        time_min: Start ISO datetime (bijv. '2025-01-01T00:00:00+01:00')
+        time_max: End ISO datetime
+        timezone: IANA timezone
+        max_results: Maximum aantal events
+
+    Returns:
+        Lijst van event dicts met summary, start, end, etc.
+    """
+    settings = get_settings()
+    service = get_calendar_service()
+    calendar_id = settings.google_calendar_id or "primary"
+
+    result = (
+        service.events()
+        .list(
+            calendarId=calendar_id,
+            timeMin=time_min,
+            timeMax=time_max,
+            maxResults=max_results,
+            singleEvents=True,
+            orderBy="startTime",
+            timeZone=timezone,
+        )
+        .execute()
+    )
+
+    return result.get("items", [])
+
+
+def get_free_slots(
+    date_str: str,
+    timezone: str = "Europe/Amsterdam",
+    work_start: int = 9,
+    work_end: int = 18,
+    min_slot_minutes: int = 30,
+) -> List[Dict[str, str]]:
+    """
+    Bereken vrije tijdsloten op een bepaalde dag.
+
+    Args:
+        date_str: Datum als 'YYYY-MM-DD'
+        timezone: IANA timezone
+        work_start: Begin werkdag (uur)
+        work_end: Einde werkdag (uur)
+        min_slot_minutes: Minimale slotgrootte in minuten
+
+    Returns:
+        Lijst van dicts met 'start' en 'end' als HH:MM strings
+    """
+    from datetime import datetime, timedelta
+    import pytz
+
+    tz = pytz.timezone(timezone)
+    day = datetime.strptime(date_str, "%Y-%m-%d")
+    day_start = tz.localize(day.replace(hour=work_start, minute=0, second=0))
+    day_end = tz.localize(day.replace(hour=work_end, minute=0, second=0))
+
+    events = list_events(
+        time_min=day_start.isoformat(),
+        time_max=day_end.isoformat(),
+        timezone=timezone,
+    )
+
+    # Bouw lijst van bezette periodes
+    busy: List[tuple] = []
+    for ev in events:
+        start_raw = ev.get("start", {})
+        end_raw = ev.get("end", {})
+        # dateTime voor timed events, date voor all-day
+        s = start_raw.get("dateTime") or start_raw.get("date")
+        e = end_raw.get("dateTime") or end_raw.get("date")
+        if not s or not e:
+            continue
+        try:
+            ev_start = datetime.fromisoformat(s)
+            ev_end = datetime.fromisoformat(e)
+            if ev_start.tzinfo is None:
+                ev_start = tz.localize(ev_start)
+            if ev_end.tzinfo is None:
+                ev_end = tz.localize(ev_end)
+            busy.append((ev_start, ev_end))
+        except (ValueError, TypeError):
+            continue
+
+    # Sorteer op start
+    busy.sort(key=lambda x: x[0])
+
+    # Vind vrije slots
+    free_slots: List[Dict[str, str]] = []
+    cursor = day_start
+    min_delta = timedelta(minutes=min_slot_minutes)
+
+    for b_start, b_end in busy:
+        if b_start > cursor:
+            gap = b_start - cursor
+            if gap >= min_delta:
+                free_slots.append({
+                    "start": cursor.strftime("%H:%M"),
+                    "end": b_start.strftime("%H:%M"),
+                })
+        if b_end > cursor:
+            cursor = b_end
+
+    # Slot na laatste event tot einde werkdag
+    if cursor < day_end:
+        gap = day_end - cursor
+        if gap >= min_delta:
+            free_slots.append({
+                "start": cursor.strftime("%H:%M"),
+                "end": day_end.strftime("%H:%M"),
+            })
+
+    return free_slots

@@ -663,6 +663,76 @@ class MemorySystem:
             "calls_by_type": by_type
         }
 
+    # === WEEKLY ACTIVITY ===
+
+    async def get_weekly_activity(
+        self,
+        telegram_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Haal activiteiten van de afgelopen 7 dagen op voor weekoverzicht.
+
+        Returns:
+            Dict met calls, sms_messages, emails, reminders
+        """
+        from datetime import datetime, timedelta
+
+        user = await self.get_or_create_user(telegram_id)
+        user_db_id = user["id"]
+        week_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+
+        # Calls
+        calls = []
+        try:
+            result = self.client.table("agent_calls").select("*").eq(
+                "user_id", user_db_id
+            ).gte("created_at", week_ago).order("created_at", desc=True).execute()
+            calls = result.data or []
+        except Exception:
+            pass
+
+        # Messages (sms en email) uit conversation messages
+        sms_messages = []
+        emails = []
+        try:
+            # Haal conversatie IDs
+            convs = self.client.table("agent_conversations").select("id").eq(
+                "user_id", user_db_id
+            ).gte("started_at", week_ago).execute()
+            conv_ids = [c["id"] for c in (convs.data or [])]
+
+            if conv_ids:
+                msgs = self.client.table("agent_messages").select("*").in_(
+                    "conversation_id", conv_ids
+                ).eq("role", "assistant").gte("created_at", week_ago).execute()
+
+                for m in (msgs.data or []):
+                    content = m.get("content", "")
+                    meta = m.get("metadata") or {}
+                    if meta.get("type") == "sms" or "[SMS verstuurd]" in content:
+                        sms_messages.append(m)
+                    elif meta.get("type") == "email" or "[E-mail verstuurd]" in content:
+                        emails.append(m)
+        except Exception:
+            pass
+
+        # Reminders
+        reminders = []
+        try:
+            result = self.client.table("agent_reminders").select("*").eq(
+                "user_id", user_db_id
+            ).gte("created_at", week_ago).order("remind_at").execute()
+            reminders = result.data or []
+        except Exception:
+            pass
+
+        return {
+            "calls": calls,
+            "sms_messages": sms_messages,
+            "emails": emails,
+            "reminders": reminders,
+        }
+
     # === CONTEXT BUILDING ===
 
     async def get_user_context(self, telegram_id: str) -> Dict[str, Any]:
