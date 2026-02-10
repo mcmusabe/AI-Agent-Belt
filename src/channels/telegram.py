@@ -1083,6 +1083,11 @@ Typ gewoon wat je wilt!
 
         elif step == WizardStep.ENTER_MESSAGE:
             wizard.message_body = text.strip()
+            # Voor bellen en SMS: skip bevestiging, DIRECT uitvoeren
+            if wizard.wizard_type in (WizardType.BELLEN, WizardType.SMS):
+                await update.message.reply_text("⏳ Bezig…")
+                await self._execute_wizard_from_message(update, wizard)
+                return
             self._advance_wizard(user_id)
             await self._render_wizard_step(update, wizard)
 
@@ -1327,15 +1332,11 @@ Typ gewoon wat je wilt!
 
     # ── Wizard executie ────────────────────────────────────────────────
 
-    async def _execute_wizard(self, query, wizard: WizardState):
-        """Bouw taak-string en voer uit via de orchestrator"""
-        user_id = wizard.user_id
-        chat_id = wizard.chat_id
+    def _build_wizard_task(self, wizard: WizardState) -> str:
+        """Bouw taak-string vanuit wizard data"""
         wt = wizard.wizard_type
 
-        # Bouw natuurlijke taak-string — altijd met telefoonnummer/email erbij
         if wt == WizardType.BELLEN:
-            # Zorg dat het telefoonnummer ALTIJD in de task zit
             contact_display = wizard.contact_name or wizard.phone_number
             task = f"Bel {contact_display}"
             if wizard.phone_number and wizard.phone_number != contact_display:
@@ -1362,6 +1363,70 @@ Typ gewoon wat je wilt!
 
         else:
             task = "onbekende actie"
+
+        return task
+
+    async def _execute_wizard_from_message(self, update: Update, wizard: WizardState):
+        """Voer wizard uit vanuit een tekst-bericht (niet callback query)"""
+        user_id = wizard.user_id
+        chat_id = wizard.chat_id
+        wt = wizard.wizard_type
+        task = self._build_wizard_task(wizard)
+
+        # Clear wizard vóór executie
+        self._clear_wizard(user_id)
+
+        try:
+            result = await process_request(
+                user_message=task,
+                user_id=user_id,
+                confirmed=True,
+            )
+
+            response = result.get("response", "Er ging iets mis.")
+            await update.message.reply_text(response)
+
+            # Start call polling als het een bel-actie was
+            call_id = result.get("call_id")
+            if call_id and call_id != "onbekend":
+                self._pending_calls[call_id] = {
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "started_at": asyncio.get_event_loop().time(),
+                }
+                asyncio.create_task(
+                    self.poll_call_transcript(call_id, chat_id, user_id)
+                )
+
+            # Log in memory
+            if self.memory:
+                try:
+                    conv = await self.memory.get_active_conversation(user_id)
+                    if not conv:
+                        conv = await self.memory.start_conversation(user_id)
+                    await self.memory.add_message(
+                        conversation_id=conv["id"],
+                        role="user",
+                        content=f"[Wizard: {wt.value}] {task}",
+                    )
+                    await self.memory.add_message(
+                        conversation_id=conv["id"],
+                        role="assistant",
+                        content=response,
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error(f"Wizard executie fout: {e}")
+            await update.message.reply_text(f"❌ Er ging iets mis: {str(e)}")
+
+    async def _execute_wizard(self, query, wizard: WizardState):
+        """Bouw taak-string en voer uit via de orchestrator (vanuit callback query)"""
+        user_id = wizard.user_id
+        chat_id = wizard.chat_id
+        wt = wizard.wizard_type
+        task = self._build_wizard_task(wizard)
 
         # Clear wizard vóór executie
         self._clear_wizard(user_id)
@@ -1415,18 +1480,48 @@ Typ gewoon wat je wilt!
 
     @staticmethod
     def _looks_like_full_command(text: str) -> bool:
-        """Detecteer of tekst een volledig commando is dat de wizard moet bypassen"""
+        """Detecteer of tekst een volledig commando is dat de wizard moet bypassen.
+
+        BELANGRIJK: Als de wizard in ENTER_MESSAGE stap zit en de gebruiker typt
+        "Bel hem en vraag hoe het gaat", moet dat NIET als commando gezien worden.
+        Alleen echte commando's met een telefoonnummer of duidelijke contactnaam.
+        """
         lower = text.lower().strip()
-        patterns = [
-            r'^bel\s+\w+',
-            r'^sms\s+\w+',
-            r'^mail\s+\w+',
-            r'^stuur\s+(sms|mail|email)',
+
+        # Woorden die GEEN contactnaam zijn — niet matchen als escape
+        non_contact_words = {
+            "hem", "haar", "ze", "mij", "me", "je", "u", "ons", "hen",
+            "dat", "dit", "het", "een", "de", "nu", "eens", "even",
+            "maar", "ook", "dan", "nog", "wel", "niet", "op",
+        }
+
+        patterns_with_name = [
+            (r'^bel\s+(\w+)', 1),
+            (r'^sms\s+(\w+)', 1),
+            (r'^mail\s+(\w+)', 1),
+        ]
+        for pattern, group_idx in patterns_with_name:
+            m = _re_module.match(pattern, lower)
+            if m:
+                captured = m.group(group_idx)
+                # Alleen een echt commando als het woord erna een naam/nummer is
+                if captured in non_contact_words:
+                    continue  # "bel hem" is GEEN commando
+                # Check of het een telefoonnummer is
+                if captured[0].isdigit() or captured.startswith("+"):
+                    return True
+                # Het is een naam — dat is een echt commando
+                return True
+
+        # Andere patterns die altijd een commando zijn
+        other_patterns = [
+            r'^stuur\s+(sms|mail|email)\s+naar\s+\w+',
             r'^zet\s+.+\s+in\s+(mijn\s+)?agenda',
         ]
-        for pattern in patterns:
+        for pattern in other_patterns:
             if _re_module.match(pattern, lower):
                 return True
+
         return False
 
     # ── Groeps-SMS/mail ──────────────────────────────────────────────
