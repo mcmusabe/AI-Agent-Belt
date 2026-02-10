@@ -268,6 +268,10 @@ class VoiceAgent:
                 overrides["voice"] = {
                     "provider": "11labs",
                     "voiceId": effective_voice_id,
+                    "model": "eleven_multilingual_v2",
+                    "language": "nl",
+                    "stability": 0.5,
+                    "similarityBoost": 0.75,
                 }
             payload: Dict[str, Any] = {
                 "assistantId": self.settings.vapi_assistant_id,
@@ -384,6 +388,10 @@ class VoiceAgent:
         voice_config: Dict[str, Any] = {
             "provider": "11labs",
             "voiceId": resolved_id,
+            "model": "eleven_multilingual_v2",
+            "language": "nl",
+            "stability": 0.5,
+            "similarityBoost": 0.75,
         }
 
         return {
