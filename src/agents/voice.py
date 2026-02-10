@@ -218,17 +218,36 @@ class VoiceAgent:
         else:
             logger.debug("No ELEVENLABS_VOICE_ID set, using voice: %s", effective_voice_id)
 
+        # Nederlandse analyse-prompt voor Vapi samenvatting
+        analysis_plan: Dict[str, Any] = {
+            "summaryPlan": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Je bent een assistent die samenvattingen schrijft in het Nederlands. "
+                            "Schrijf een korte samenvatting van het telefoongesprek. "
+                            "Vermeld: wie er belde, wat het doel was, wat het resultaat was. "
+                            "Maximaal 3 zinnen. ALLEEN Nederlands, geen Engels."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": "{{transcript}}",
+                    },
+                ],
+            },
+        }
+
         # Als er een Vapi assistant is geconfigureerd, gebruik die.
         if self.settings.vapi_assistant_id:
-            # keyterm alleen toegestaan bij Deepgram nova-3/flux; bij nova-2 weglaten
             transcriber_config: Dict[str, Any] = {
                 "provider": "deepgram",
                 "language": "nl",
                 "model": "nova-2",
                 "keywords": [
-                    "broodje", "cola", "biertje", "koffie", "thee", "water",
-                    "frikandel", "kroket", "patat", "pizza", "salade", "soep",
-                    "Musabbe", "Musabi", "Connect", "Sophie",
+                    "Sophie", "Connect", "Smart",
+                    "Musabbe", "Musabi",
                 ],
             }
             overrides: Dict[str, Any] = {
@@ -237,11 +256,12 @@ class VoiceAgent:
                     "provider": "anthropic",
                     "model": "claude-sonnet-4-20250514",
                     "messages": [{"role": "system", "content": system_prompt}],
-                    "temperature": 0.6,
+                    "temperature": 0.5,
                 },
                 "transcriber": transcriber_config,
+                "analysisPlan": analysis_plan,
                 "responseDelaySeconds": 0.35,
-                "silenceTimeoutSeconds": 10,
+                "silenceTimeoutSeconds": 15,
                 "llmRequestDelaySeconds": 0.15,
             }
             if effective_voice_id:
@@ -378,11 +398,10 @@ class VoiceAgent:
                             "content": system_prompt
                         }
                     ],
-                    "temperature": 0.6,  # Iets lager voor consistentere responses
+                    "temperature": 0.5,
                 },
                 "voice": voice_config,
-                # Snellere timing = natuurlijker gesprek (niet te traag)
-                "silenceTimeoutSeconds": 10,
+                "silenceTimeoutSeconds": 15,
                 "responseDelaySeconds": 0.35,
                 "llmRequestDelaySeconds": 0.15,
                 "numWordsToInterruptAssistant": 3,
@@ -390,15 +409,32 @@ class VoiceAgent:
                 "endCallMessage": "Oké, bedankt! Doei!",
                 "endCallPhrases": ["doei", "dag", "tot ziens", "bedankt", "dankjewel", "fijne dag"],
                 "backgroundSound": "off",
-                # Transcriptie: Nederlands + keywords (keyterm alleen bij nova-3/flux)
                 "transcriber": {
                     "provider": "deepgram",
                     "language": "nl",
                     "model": "nova-2",
                     "keywords": [
-                        "broodje", "cola", "biertje", "koffie", "thee", "water",
-                        "frikandel", "kroket", "patat", "pizza", "salade", "soep",
+                        "Sophie", "Connect", "Smart",
                     ],
+                },
+                "analysisPlan": {
+                    "summaryPlan": {
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Je bent een assistent die samenvattingen schrijft in het Nederlands. "
+                                    "Schrijf een korte samenvatting van het telefoongesprek. "
+                                    "Vermeld: wie er belde, wat het doel was, wat het resultaat was. "
+                                    "Maximaal 3 zinnen. ALLEEN Nederlands, geen Engels."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": "{{transcript}}",
+                            },
+                        ],
+                    },
                 },
             },
             "customer": {

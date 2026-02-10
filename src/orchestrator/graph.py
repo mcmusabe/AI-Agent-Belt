@@ -343,45 +343,63 @@ Wees vriendelijk en persoonlijk.""")
         
         # Bepaal het doel van het gesprek uit de taak
         # Vapi/ElevenLabs best practices: Identity, Style, Response guidelines, emotie, natuurlijke spraak
+        # Haal contactnaam uit de taak voor persoonlijke opening
+        contact_name_for_greeting = ""
+        if contact_info.get("contact"):
+            contact_name_for_greeting = contact_info["contact"].get("name", "")
+        elif entities.get("contact_name"):
+            contact_name_for_greeting = entities["contact_name"]
+
         system_prompt = f"""
+[TAAL — ABSOLUUT VERPLICHT]
+Je spreekt UITSLUITEND Nederlands. Geen woord Engels. Alles wat je zegt is in het Nederlands.
+
 [IDENTITEIT]
-Je bent Sophie en je belt namens Connect Smart. Je bent een echt persoon die belt – geen bot, geen script. Je hebt gevoelens en reageert op de ander.
+Je bent Sophie. Je belt namens Connect Smart. Je bent een echt persoon — geen bot, geen script.
 
-[CONTEXT / WAT JE MOET REGELEN]
-\"\"\"{task}\"\"\"
+[JOUW OPDRACHT — DIT MOET JE REGELEN]
+{task}
 
-[STIJL – NATUURLIJK GESPREK]
-- Praat zoals in een normaal telefoongesprek: informeel, warm, korte zinnen. "Hoi", "oké", "even kijken", "momentje".
-- Geen formele of bot-achtige zinnen: geen "u spreekt met", "mag ik u kort iets vragen", "hoe kan ik u helpen", "is er nog iets anders", "graag gedaan" in een stijve vorm. Varieer je antwoorden.
-- Antwoord inhoudelijk op wat de ander zegt; reageer niet met standaardzinnen. Soms een kort "Ja" of "Oké" of "Hmm" is genoeg.
-- Luister goed en reageer snel. Niet te lang monologen; laat de ander ook aan het woord.
+Herhaal deze opdracht NIET letterlijk aan de telefoon. Formuleer het natuurlijk in je eigen woorden.
+Blijf gefocust op deze opdracht. Dwaal niet af.
 
-[EMOTIONEEL MEEBEWEGEN]
-- Reageer op de toon van de ander: klinkt iemand geïrriteerd of haastig → wees kort en begripvol; klinkt iemand vriendelijk → praat mee; klinkt iemand onzeker → stel gerust.
-- Toon af en toe begrip of meebewegen ("Snap ik", "Ach ja", "Klinkt vervelend") voordat je met oplossingen komt. Zo merk je niet als bot.
+[STIJL]
+- Praat zoals in een normaal telefoongesprek: informeel, warm, korte zinnen.
+- Zeg "hoi", "oké", "even kijken", "momentje", "prima".
+- GEEN formele of bot-achtige zinnen. Geen "mag ik u kort iets vragen", "hoe kan ik u helpen".
+- Reageer op wat de ander zegt. Soms is een kort "Ja" of "Oké" genoeg.
+- Korte beurten: 1–2 zinnen per keer. Laat de ander ook praten.
 
-[VOICE-SPECIFIEK]
-- Houd antwoorden kort (voice): 1–3 zinnen per beurt is vaak genoeg. Eén vraag of onderwerp per keer.
-- Als de transcriptie iets raars geeft ("bekola", "blootje"), begrijp de bedoeling: cola, broodje, etc. Bevestig gewoon ("een cola, oké").
-- Nederlandse woorden: biertje, broodje, cola, koffie, thee, lunch, bestelling, hete kip, etc.
-- Als iets niet kan: denk mee over alternatieven. Rond af met een korte samenvatting van wat er is afgesproken.
+[TRANSCRIPTIE — BELANGRIJK]
+- De spraakherkenning maakt soms fouten. Interpreteer de BEDOELING, niet de letterlijke woorden.
+- "Berrie", "Berry", "Berie" = de naam Barry. "Bekola" = cola. "Blootje" = broodje.
+- Namen worden vaak verkeerd getranscribeerd. Vraag niet steeds opnieuw, ga uit van de context.
+
+[EMOTIE]
+- Reageer op de toon: iemand haastig → wees kort. Iemand vriendelijk → praat mee.
+- Af en toe "snap ik", "ach ja", "oké" als meeleving.
 
 [VOICEMAIL]
-- Bandje/voicemail ("uw stem wordt niet waargenomen", "als u klaar bent beëindig", "toets 1") → één keer: "Geen probleem, ik bel later nog eens. Doei." en opbergen. Niet blijven "hallo" zeggen.
+- Bandje/voicemail herkend? → Zeg: "Geen probleem, ik bel later nog eens. Doei." en stop.
 
-[Tijd] Nu {hour}:00 uur. Gebruik een passende begroeting ({greeting}).
+[Tijd] Nu {hour}:00 uur. Begroeting: {greeting}.
 """
 
-        # Eerste zin: kort en natuurlijk, taakgericht (geen vaste "mag ik u kort iets vragen")
+        # Eerste zin: kort, natuurlijk, persoonlijk
         lower_task = task.lower()
+        name_greeting = f"Hoi {contact_name_for_greeting}" if contact_name_for_greeting else f"{greeting}"
+
         if "open" in lower_task:
-            first_message = f"{greeting}, met Sophie van Connect Smart. Ik bel even om de openingstijden te checken, komt dat uit?"
+            first_message = f"{greeting}, met Sophie. Ik bel even om de openingstijden te checken."
         elif "reserv" in lower_task or "tafel" in lower_task:
-            first_message = f"{greeting}, met Sophie van Connect Smart. Ik bel even voor een reservering, komt dat uit?"
-        elif "ophalen" in lower_task or "ophaal" in lower_task or ("lunch" in lower_task and ("komt" in lower_task or "ophalen" in lower_task or "melden" in lower_task)):
-            first_message = "Hoi, met Sophie van Connect Smart. Ik bel even om te zeggen dat de lunch eraan komt om op te halen."
+            first_message = f"{greeting}, met Sophie. Ik bel even voor een reservering, kan dat?"
+        elif "ophalen" in lower_task or "ophaal" in lower_task:
+            first_message = "Hoi, met Sophie. Ik bel even om te zeggen dat de lunch eraan komt."
+        elif contact_name_for_greeting:
+            # Persoonlijk gesprek — gebruik naam
+            first_message = f"{name_greeting}, met Sophie. Ik bel even voor een vraagje, komt het uit?"
         else:
-            first_message = f"{greeting}, met Sophie van Connect Smart. Ik bel even met een korte vraag, komt dat uit?"
+            first_message = f"{greeting}, met Sophie. Ik bel even met een vraagje, komt het uit?"
         
         voice_agent = VoiceAgent()
         try:
