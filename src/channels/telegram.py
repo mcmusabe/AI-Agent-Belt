@@ -2082,8 +2082,10 @@ Typ gewoon wat je wilt!
                 )
                 return
 
-            # Escape hatch: volledig commando bypass wizard
-            if self._looks_like_full_command(message_text):
+            # Escape hatch: alleen in SELECT_CONTACT stap mag een volledig
+            # commando de wizard bypassen. In alle andere stappen (ENTER_MESSAGE,
+            # ENTER_NUMBER, etc.) is de input ALTIJD voor de wizard.
+            if wizard.current_step == WizardStep.SELECT_CONTACT and self._looks_like_full_command(message_text):
                 self._clear_wizard(user_id)
                 # Val door naar normale verwerking hieronder
             else:
