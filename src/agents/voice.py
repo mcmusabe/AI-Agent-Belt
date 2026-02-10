@@ -254,10 +254,10 @@ class VoiceAgent:
                 "firstMessage": first_message,
                 "model": {
                     "provider": "openai",
-                    "model": "gpt-4o-mini",
+                    "model": "gpt-4o",
                     "messages": [{"role": "system", "content": system_prompt}],
-                    "temperature": 0.4,
-                    "maxTokens": 150,
+                    "temperature": 0.3,
+                    "maxTokens": 220,
                 },
                 "transcriber": transcriber_config,
                 "analysisPlan": analysis_plan,
@@ -402,15 +402,15 @@ class VoiceAgent:
                 "firstMessage": first_message,
                 "model": {
                     "provider": "openai",
-                    "model": "gpt-4o-mini",
+                    "model": "gpt-4o",
                     "messages": [
                         {
                             "role": "system",
                             "content": system_prompt
                         }
                     ],
-                    "temperature": 0.4,
-                    "maxTokens": 150,
+                    "temperature": 0.3,
+                    "maxTokens": 220,
                 },
                 "voice": voice_config,
                 "silenceTimeoutSeconds": 20,
@@ -790,6 +790,56 @@ ALS HET NIET LUKT:
         }
         return status_map.get(status, status)
 
+    def _looks_bad_summary(self, summary: str) -> bool:
+        """Detecteer duidelijk onjuiste of onnatuurlijke samenvattingen."""
+        s = (summary or "").lower().strip()
+        if not s:
+            return True
+        bad_markers = [
+            "momenteel bezig",
+            "bezig met het uitvoeren van deze oproep",
+            "probeer het nummer",
+            "doel om het nummer",
+            "ik hebt",
+            "deze oproep uit te voeren",
+        ]
+        return any(marker in s for marker in bad_markers)
+
+    def _build_local_summary_nl(
+        self,
+        transcript: str,
+        status: str,
+        duration: int,
+        ended_reason: str
+    ) -> str:
+        """Bouw een korte, stabiele Nederlandse samenvatting uit transcript + status."""
+        lines = [ln.strip() for ln in (transcript or "").splitlines() if ln.strip()]
+        ai_lines = [ln[3:].strip() for ln in lines if ln.lower().startswith("ai:")]
+        user_lines = [ln[5:].strip() for ln in lines if ln.lower().startswith("user:")]
+
+        if not lines:
+            reason = _ended_reason_to_message(ended_reason) if ended_reason else "Geen inhoud beschikbaar."
+            return f"Gesprek beëindigd. {reason}"
+
+        duration_text = f"{duration} seconden" if duration else "onbekende duur"
+
+        if ai_lines and user_lines:
+            first_ai = ai_lines[0][:120]
+            first_user = user_lines[0][:120]
+            return (
+                f"Sophie opende het gesprek met: \"{first_ai}\". "
+                f"De gesprekspartner reageerde met: \"{first_user}\". "
+                f"Het gesprek eindigde na {duration_text}."
+            )
+
+        if ai_lines:
+            return (
+                f"Sophie voerde een kort gesprek en zei onder andere: \"{ai_lines[0][:140]}\". "
+                f"Het gesprek eindigde na {duration_text}."
+            )
+
+        return f"Kort gesprek gevoerd. Status: {self._status_to_dutch(status)}. Duur: {duration_text}."
+
     def _calculate_duration(self, call_data: Dict[str, Any]) -> Optional[int]:
         """Bereken gespreksduur uit call data"""
         # Probeer eerst directe duration
@@ -831,6 +881,15 @@ ALS HET NIET LUKT:
 
         # Duur berekenen
         duration = self._calculate_duration(call_data) or 0
+
+        # Vervang slechte/hallucinerende samenvattingen met lokale, deterministische samenvatting
+        if self._looks_bad_summary(summary):
+            summary = self._build_local_summary_nl(
+                transcript=transcript or "",
+                status=status,
+                duration=duration,
+                ended_reason=ended_reason,
+            )
 
         return {
             "success": True,

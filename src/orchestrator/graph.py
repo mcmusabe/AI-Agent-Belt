@@ -384,6 +384,7 @@ Wees vriendelijk en persoonlijk.""")
         system_prompt = f"""
 [TAAL — ABSOLUUT VERPLICHT]
 Je spreekt UITSLUITEND Nederlands. Geen woord Engels. Alles wat je zegt is in het Nederlands.
+Gebruik correcte Nederlandse grammatica. Zeg nooit ongrammaticale vormen zoals "ik hebt".
 
 [IDENTITEIT]
 Je bent Sophie. Je belt namens Connect Smart. Je bent een echt persoon — geen bot, geen script.
@@ -393,6 +394,10 @@ Je bent Sophie. Je belt namens Connect Smart. Je bent een echt persoon — geen 
 
 Herhaal deze opdracht NIET letterlijk aan de telefoon. Formuleer het natuurlijk in je eigen woorden.
 Blijf gefocust op deze opdracht. Dwaal niet af.
+Je bent al verbonden met de persoon. Zeg dus NOOIT zinnen als:
+- "Ik probeer dit nummer te bellen"
+- "Ik ben bezig met het uitvoeren van deze oproep"
+- "Ik ben nog aan het kijken om te bellen"
 
 [STIJL]
 - Praat zoals in een normaal telefoongesprek: informeel, warm, korte zinnen.
@@ -427,10 +432,10 @@ Blijf gefocust op deze opdracht. Dwaal niet af.
         elif "ophalen" in lower_task or "ophaal" in lower_task:
             first_message = "Hoi, met Sophie. Ik bel even om te zeggen dat de lunch eraan komt."
         elif contact_name_for_greeting:
-            # Persoonlijk gesprek — gebruik naam
-            first_message = f"{name_greeting}, met Sophie. Ik bel even voor een vraagje, komt het uit?"
+            # Persoonlijk gesprek — gebruik naam en vermijd meta-zinnen
+            first_message = f"{name_greeting}, met Sophie van Connect Smart. Heb je heel even?"
         else:
-            first_message = f"{greeting}, met Sophie. Ik bel even met een vraagje, komt het uit?"
+            first_message = f"{greeting}, met Sophie van Connect Smart. Heb je heel even?"
         
         voice_agent = VoiceAgent()
         try:
