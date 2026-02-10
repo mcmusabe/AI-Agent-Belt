@@ -845,6 +845,18 @@ Typ gewoon wat je wilt!
         try:
             idx = flow.index(wizard.current_step)
         except ValueError:
+            # Huidige stap zit niet in de flow (bijv. ENTER_NUMBER is een tussenstap).
+            # Zoek de logische volgende stap op basis van welke data we al hebben.
+            if wizard.current_step in (WizardStep.ENTER_NUMBER, WizardStep.ENTER_EMAIL):
+                # Na nummer/email invoer → ga naar de stap NA SELECT_CONTACT
+                try:
+                    sc_idx = flow.index(WizardStep.SELECT_CONTACT)
+                    if sc_idx + 1 < len(flow):
+                        wizard.current_step = flow[sc_idx + 1]
+                        return wizard.current_step
+                except ValueError:
+                    pass
+            # Fallback: ga naar de eerste stap die we nog niet gehad hebben
             return None
         if idx + 1 < len(flow):
             wizard.current_step = flow[idx + 1]
