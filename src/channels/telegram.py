@@ -1333,20 +1333,29 @@ Typ gewoon wat je wilt!
         chat_id = wizard.chat_id
         wt = wizard.wizard_type
 
-        # Bouw natuurlijke taak-string
+        # Bouw natuurlijke taak-string — altijd met telefoonnummer/email erbij
         if wt == WizardType.BELLEN:
-            contact = wizard.contact_name or wizard.phone_number
-            task = f"Bel {contact}"
+            # Zorg dat het telefoonnummer ALTIJD in de task zit
+            contact_display = wizard.contact_name or wizard.phone_number
+            task = f"Bel {contact_display}"
+            if wizard.phone_number and wizard.phone_number != contact_display:
+                task += f" ({wizard.phone_number})"
             if wizard.message_body:
                 task += f" en zeg: {wizard.message_body}"
 
         elif wt == WizardType.SMS:
-            contact = wizard.contact_name or wizard.phone_number
-            task = f"Stuur SMS naar {contact} dat {wizard.message_body}"
+            contact_display = wizard.contact_name or wizard.phone_number
+            task = f"Stuur SMS naar {contact_display}"
+            if wizard.phone_number and wizard.phone_number != contact_display:
+                task += f" ({wizard.phone_number})"
+            task += f" dat {wizard.message_body}"
 
         elif wt == WizardType.MAIL:
-            contact = wizard.contact_name or wizard.email_address
-            task = f"Mail {contact} met onderwerp '{wizard.subject}': {wizard.message_body}"
+            contact_display = wizard.contact_name or wizard.email_address
+            task = f"Mail {contact_display}"
+            if wizard.email_address and wizard.email_address != contact_display:
+                task += f" ({wizard.email_address})"
+            task += f" met onderwerp '{wizard.subject}': {wizard.message_body}"
 
         elif wt == WizardType.AGENDA:
             task = f"Zet {wizard.event_title} in mijn agenda op {wizard.event_datetime}"

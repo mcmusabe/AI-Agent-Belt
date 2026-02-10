@@ -75,43 +75,71 @@ def create_agent_graph():
     # Initialiseer planner (stateless per request)
     planner = PlannerAgent()
 
-    def _missing_info_questions(intent: Dict[str, Any]) -> List[str]:
-        """Rule-based checks voor ontbrekende data bij acties."""
+    def _missing_info_questions(intent: Dict[str, Any], task: str = "") -> List[str]:
+        """Rule-based checks voor ontbrekende data bij acties.
+
+        BELANGRIJK: Wees zuinig met vragen. Als de gebruiker genoeg info geeft
+        om de actie uit te voeren, stel dan GEEN vragen. Alleen vragen stellen
+        als het écht onmogelijk is om door te gaan.
+        """
+        import re as _re
+
         intent_type = intent.get("intent", "")
         entities = intent.get("entities", {}) or {}
         questions: List[str] = []
+        task_lower = task.lower() if task else ""
+
+        # Helper: check of er een telefoonnummer in de tekst zit
+        has_phone_in_task = bool(_re.search(r'\+?\d[\d\s\-]{7,}', task))
+        # Helper: check of er een e-mail in de tekst zit
+        has_email_in_task = bool(_re.search(r'\S+@\S+\.\S+', task))
+        # Helper: check of er een naam in de tekst zit (na bel/sms/mail)
+        has_name_in_task = bool(_re.search(
+            r'(?:bel|sms|mail|stuur)\s+(?:eens\s+)?(?:naar\s+)?(\w{2,})',
+            task_lower
+        ))
 
         if intent_type == "bellen":
-            if not entities.get("phone_number") and not entities.get("contact_name"):
+            # Alleen vragen als er ECHT geen nummer of naam is
+            if (not entities.get("phone_number")
+                    and not entities.get("contact_name")
+                    and not has_phone_in_task
+                    and not has_name_in_task):
                 questions.append("Welk telefoonnummer moet ik bellen? (of geef een contactnaam)")
 
-        if intent_type == "sms":
-            if not entities.get("phone_number") and not entities.get("contact_name"):
+        elif intent_type == "sms":
+            if (not entities.get("phone_number")
+                    and not entities.get("contact_name")
+                    and not has_phone_in_task
+                    and not has_name_in_task):
                 questions.append("Naar wie wil je een SMS sturen? (naam of telefoonnummer)")
-            if not entities.get("message_body"):
-                questions.append("Wat moet er in het SMS bericht staan?")
+            # Bericht is NIET verplicht om te vragen — de hele tekst kan het bericht zijn
 
-        if intent_type == "mail":
-            if not entities.get("email_address") and not entities.get("contact_name"):
+        elif intent_type == "mail":
+            if (not entities.get("email_address")
+                    and not entities.get("contact_name")
+                    and not has_email_in_task
+                    and not has_name_in_task):
                 questions.append("Naar wie wil je de mail sturen? (naam of e-mailadres)")
-            if not entities.get("message_body"):
-                questions.append("Wat moet er in de mail staan?")
 
-        if intent_type == "agenda":
-            if not entities.get("event_summary"):
-                questions.append("Wat is de titel van de afspraak?")
+        elif intent_type == "agenda":
+            # Titel: de hele taak kan de titel zijn, dus niet vragen
+            # Datum: alleen vragen als er écht niks over tijd/datum staat
             if not entities.get("date") and not entities.get("event_start"):
-                questions.append("Wanneer is de afspraak? (datum en tijd)")
+                time_words = ["morgen", "overmorgen", "vandaag", "maandag", "dinsdag",
+                              "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag",
+                              "volgende week", "vanavond", "vanmiddag"]
+                has_time_ref = any(w in task_lower for w in time_words)
+                has_date_pattern = bool(_re.search(r'\d{1,2}[-/]\d{1,2}', task))
+                has_time_pattern = bool(_re.search(r'\d{1,2}[:.]\d{2}|\d{1,2}\s*uur', task))
+                if not has_time_ref and not has_date_pattern and not has_time_pattern:
+                    questions.append("Wanneer is de afspraak? (datum en tijd)")
 
-        if intent_type == "reservering":
+        elif intent_type == "reservering":
             if not entities.get("venue"):
                 questions.append("Bij welk restaurant/locatie wil je reserveren?")
-            if not entities.get("date"):
-                questions.append("Voor welke datum?")
-            if not entities.get("time"):
-                questions.append("Welke tijd?")
-            if not entities.get("party_size"):
-                questions.append("Voor hoeveel personen?")
+            # Datum, tijd, party_size — niet noodzakelijk om te vragen,
+            # de voice agent kan het uitzoeken
 
         return questions
     
@@ -122,32 +150,35 @@ def create_agent_graph():
         task = state["current_task"]
         user_id = state.get("user_id", "default")
         user_context = state.get("user_context")
-        
+        confirmed = bool(state.get("confirmed"))
+
         # Analyseer intent
         intent = await planner.analyze_intent(task)
-        
+
         # Maak uitvoeringsplan
         plan = await planner.create_plan(task)
-        
-        # Bepaal of verduidelijking of bevestiging nodig is
-        clarification_questions = list(intent.get("clarification_questions") or [])
-        clarification_questions.extend(_missing_info_questions(intent))
-        # Deduplicate while preserving order
-        seen = set()
-        clarification_questions = [
-            q for q in clarification_questions
-            if q and not (q in seen or seen.add(q))
-        ]
-        needs_clarification = len(clarification_questions) > 0
 
-        confirmed = bool(state.get("confirmed"))
+        # ── Als confirmed=True (wizard of "ja"), SKIP alle clarification ──
+        clarification_questions = []
         needs_confirmation = False
-        if not confirmed and not needs_clarification:
-            intent_type = intent.get("intent", "")
-            needs_confirmation = bool(
-                plan.requires_user_confirmation
-                or intent_type in ["bellen", "sms", "mail", "aankoop", "reservering"]
-            )
+
+        if not confirmed:
+            # Alleen vragen stellen als NIET al bevestigd
+            clarification_questions = _missing_info_questions(intent, task)
+            # Deduplicate while preserving order
+            seen = set()
+            clarification_questions = [
+                q for q in clarification_questions
+                if q and not (q in seen or seen.add(q))
+            ]
+            needs_clarification = len(clarification_questions) > 0
+
+            if not needs_clarification:
+                intent_type = intent.get("intent", "")
+                needs_confirmation = bool(
+                    plan.requires_user_confirmation
+                    or intent_type in ["bellen", "sms", "mail", "aankoop", "reservering"]
+                )
         
         # Probeer voorkeuren te extraheren en op te slaan
         if settings.supabase_url and settings.supabase_anon_key:

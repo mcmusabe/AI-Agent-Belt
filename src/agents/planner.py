@@ -143,7 +143,6 @@ Geef je antwoord als JSON in dit formaat:
 1. De primaire intentie
 2. Entiteiten (telefoonnummer, naam, datum, tijd, bericht, etc.)
 3. Urgentie (hoog, normaal, laag)
-4. Of er aanvullende informatie nodig is
 
 INTENT HERKENNING:
 - "bel", "bellen", "telefoneer", "call", "telefoon" → intent = "bellen"
@@ -156,17 +155,25 @@ INTENT HERKENNING:
 - kopen, bestellen → intent = "aankoop"
 - algemene vragen → intent = "vraag"
 
+BELANGRIJK BIJ ENTITEITEN:
+- Lees de HELE zin. "Zeg tegen musabe dat ik hem mis" → contact_name = "musabe", message_body = "ik hem mis en wil met hem afspreken"
+- Als iemand zegt "bel 0612345678 en zeg X" → phone_number = "0612345678", message_body = "X"
+- Als de hele zin een boodschap is, gebruik die als message_body
+
+STEL NOOIT clarification_questions. De orchestrator handelt dat af.
+Geef needs_clarification ALTIJD als false.
+
 Geef je antwoord als JSON:
 {
     "intent": "bellen|sms|mail|agenda|herinnering|reservering|informatie|aankoop|vraag|anders",
     "entities": {
-        "phone_number": "telefoonnummer indien genoemd",
-        "contact_name": "naam van persoon/contact (bijv. 'jan', 'mam', 'de dokter')",
+        "phone_number": "telefoonnummer indien genoemd (null als niet genoemd)",
+        "contact_name": "naam van persoon/contact (null als niet genoemd)",
         "venue": "restaurant/locatie naam indien genoemd",
         "date": "datum indien genoemd",
         "time": "tijd indien genoemd",
         "party_size": "aantal indien genoemd",
-        "message_body": "de tekst/inhoud van het SMS of mail bericht",
+        "message_body": "de tekst/inhoud van het bericht, sms, of mail",
         "email_address": "e-mailadres indien genoemd",
         "subject": "onderwerp voor mail indien genoemd",
         "event_summary": "titel van agenda afspraak indien relevant",
@@ -175,8 +182,8 @@ Geef je antwoord als JSON:
         "other": {}
     },
     "urgency": "hoog|normaal|laag",
-    "needs_clarification": true/false,
-    "clarification_questions": ["vraag1", "vraag2"]
+    "needs_clarification": false,
+    "clarification_questions": []
 }"""
         
         messages = [
