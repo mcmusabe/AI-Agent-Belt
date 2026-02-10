@@ -253,25 +253,28 @@ class VoiceAgent:
             overrides: Dict[str, Any] = {
                 "firstMessage": first_message,
                 "model": {
-                    "provider": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
                     "messages": [{"role": "system", "content": system_prompt}],
-                    "temperature": 0.5,
+                    "temperature": 0.4,
+                    "maxTokens": 150,
                 },
                 "transcriber": transcriber_config,
                 "analysisPlan": analysis_plan,
-                "responseDelaySeconds": 0.35,
-                "silenceTimeoutSeconds": 15,
-                "llmRequestDelaySeconds": 0.15,
+                "responseDelaySeconds": 0.1,
+                "llmRequestDelaySeconds": 0.1,
+                "silenceTimeoutSeconds": 20,
+                "numWordsToInterruptAssistant": 2,
+                "backchannelingEnabled": True,
             }
             if effective_voice_id:
                 overrides["voice"] = {
                     "provider": "11labs",
                     "voiceId": effective_voice_id,
-                    "model": "eleven_multilingual_v2",
-                    "language": "nl",
-                    "stability": 0.5,
-                    "similarityBoost": 0.75,
+                    "model": "eleven_flash_v2_5",
+                    "stability": 0.4,
+                    "similarityBoost": 0.7,
+                    "speed": 1.1,
                 }
             payload: Dict[str, Any] = {
                 "assistantId": self.settings.vapi_assistant_id,
@@ -388,31 +391,32 @@ class VoiceAgent:
         voice_config: Dict[str, Any] = {
             "provider": "11labs",
             "voiceId": resolved_id,
-            "model": "eleven_multilingual_v2",
-            "language": "nl",
-            "stability": 0.5,
-            "similarityBoost": 0.75,
+            "model": "eleven_flash_v2_5",
+            "stability": 0.4,
+            "similarityBoost": 0.7,
+            "speed": 1.1,
         }
 
         return {
             "assistant": {
                 "firstMessage": first_message,
                 "model": {
-                    "provider": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
                     "messages": [
                         {
                             "role": "system",
                             "content": system_prompt
                         }
                     ],
-                    "temperature": 0.5,
+                    "temperature": 0.4,
+                    "maxTokens": 150,
                 },
                 "voice": voice_config,
-                "silenceTimeoutSeconds": 15,
-                "responseDelaySeconds": 0.35,
-                "llmRequestDelaySeconds": 0.15,
-                "numWordsToInterruptAssistant": 3,
+                "silenceTimeoutSeconds": 20,
+                "responseDelaySeconds": 0.1,
+                "llmRequestDelaySeconds": 0.1,
+                "numWordsToInterruptAssistant": 2,
                 "maxDurationSeconds": max_duration_seconds,
                 "endCallMessage": "Oké, bedankt! Doei!",
                 "endCallPhrases": ["doei", "dag", "tot ziens", "bedankt", "dankjewel", "fijne dag"],
